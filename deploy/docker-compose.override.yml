@@ -33,7 +33,13 @@ services:
   web:
     # !override = descarta a lista do arquivo base em vez de somar a ela.
     ports: !override
-      - '127.0.0.1:8081:80'      # painel + HLS (proxy do Hestia entra aqui)
+      # MESMA PORTA DOS DOIS LADOS, e isso é obrigatório aqui.
+      # O nginx DENTRO do contêiner escuta na porta indicada por
+      # AZURACAST_HTTP_PORT — não na 80. Mapear '8081:80' apontava para uma
+      # porta onde nada escutava: o painel devolvia 502 com todos os serviços
+      # RUNNING e o nginx interno com config válida. É por isso que o arquivo
+      # base do AzuraCast usa '${AZURACAST_HTTP_PORT}:${AZURACAST_HTTP_PORT}'.
+      - '127.0.0.1:8081:8081'    # painel + HLS (proxy do Hestia entra aqui)
       - '127.0.0.1:8005:8005'    # Icecast da estação porto_do_capim
       - '127.0.0.1:8010:8010'    # harbor do Liquidsoap (locutor ao vivo)
       # SFTP e as demais ~145 portas ficam DE FORA de propósito: o que não
@@ -41,7 +47,17 @@ services:
       # mídia, acrescente aqui explicitamente com o 127.0.0.1 na frente.
 
     environment:
-      # Redundante com o .env, mas deixa o valor visível para quem lê só
-      # este arquivo.
+      # ATENÇÃO: isto NÃO é redundante com o `.env`, são coisas diferentes.
+      #   .env       -> interpolação do Compose (monta a lista `ports`)
+      #   environment-> ambiente DENTRO do contêiner (o nginx interno lê daqui)
+      #
+      # Um comentário anterior dizia "redundante, só para visibilidade" e por
+      # isso o valor 0 ficou aqui depois de ser corrigido no .env. O nginx
+      # interno gerou `listen 0;` e morreu com
+      #   [emerg] invalid port in "0" of the "listen" directive
+      # entrando em FATAL state — painel em 502 com o banco perfeitamente são.
+      #
+      # Nenhuma das duas portas é publicada para fora do loopback: o TLS é
+      # terminado pelo nginx do Hestia. Elas só precisam ser válidas.
       AZURACAST_HTTP_PORT: 8081
-      AZURACAST_HTTPS_PORT: 0
+      AZURACAST_HTTPS_PORT: 8443

@@ -290,7 +290,28 @@ setup_site() {
   $V/v-list-web-domain "$HESTIA_USER" "$DOMAIN" >/dev/null 2>&1 \
     || { $V/v-add-web-domain "$HESTIA_USER" "$DOMAIN"; ok "domínio criado"; }
 
+  # `v-delete-web-domain-proxy` REMOVE o nginx.conf do domínio e não o
+  # regenera. Sem o rebuild logo em seguida, o vhost fica só com o fragmento
+  # nginx.conf_letsencrypt e o nginx nem reconhece o domínio: toda requisição
+  # cai no catch-all e o desafio ACME devolve 404. O Let's Encrypt falha 100%
+  # das vezes, e a mensagem não diz nada sobre vhost faltando.
   $V/v-delete-web-domain-proxy "$HESTIA_USER" "$DOMAIN" 2>/dev/null || true
+  $V/v-rebuild-web-domain "$HESTIA_USER" "$DOMAIN"
+  ok "vhost regenerado após remover o proxy"
+
+  # Portão: só pedimos certificado se o desafio for de fato alcançável.
+  # Cada tentativa falha incrementa o FAIL_COUNT do Hestia, que desiste do
+  # domínio após 30 — queimar tentativas às cegas custa caro.
+  local acme
+  acme=$(curl -s -m 15 -o /dev/null -w '%{http_code}' \
+         "http://${DOMAIN}/.well-known/acme-challenge/preflight" || echo "000")
+  if [[ "$acme" != "200" ]]; then
+    die "o desafio ACME devolveu HTTP ${acme} (esperado 200) em http://${DOMAIN}/.well-known/acme-challenge/
+   Não vamos pedir certificado às cegas e queimar FAIL_COUNT.
+   Verifique: DNS propagado, porta 80 alcançável de fora, vhost gerado
+   (deve existir /home/${HESTIA_USER}/conf/web/${DOMAIN}/nginx.conf)."
+  fi
+  ok "desafio ACME alcançável (HTTP 200)"
 
   # ORDEM IMPORTA: o certificado é emitido com o vhost HTTP servindo o desafio
   # ACME. Só depois trocamos para o template webradio (que já traz o bloco
