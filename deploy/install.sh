@@ -195,9 +195,16 @@ install_azuracast() {
 
   # Camada 2: `.env` do projeto. A interpolação ${AZURACAST_HTTP_PORT} lê
   # DAQUI, nunca de env_file:. Sem este arquivo, cai no default 80/443.
+  # AZURACAST_HTTPS_PORT NÃO pode ser 0.
+  # O arquivo base monta '${AZURACAST_HTTPS_PORT:-443}:${AZURACAST_HTTPS_PORT:-443}',
+  # que com 0 vira '0:0' e o Compose rejeita com
+  # "services.web.ports.[1] is missing a target port" — a config nem resolve.
+  # O valor abaixo existe só para a interpolação ser válida: o `!override` do
+  # nosso arquivo descarta as 150 portas do base (verificado: 150 -> 3), então
+  # a 8443 nunca chega a ser publicada. TLS é terminado pelo nginx do Hestia.
   cat > "$AZC_DIR/.env" <<ENVEOF
 AZURACAST_HTTP_PORT=8081
-AZURACAST_HTTPS_PORT=0
+AZURACAST_HTTPS_PORT=8443
 AZURACAST_SFTP_PORT=2022
 ENVEOF
   cat > "$AZC_DIR/azuracast.env" <<ENVEOF
@@ -211,10 +218,19 @@ ENVEOF
   # É aqui que se pega o override não fazendo efeito. Melhor abortar do que
   # descobrir com o vhost das câmaras fora do ar.
   step "Conferindo a configuração resolvida"
+  # Mostra o erro REAL do compose. A versão anterior engolia a saída com
+  # 2>/dev/null e chutava "(jq instalado?)", mandando o operador investigar a
+  # ferramenta errada — o problema era um mapeamento de porta inválido.
+  local cfg_err
+  if ! cfg_err=$(docker compose config 2>&1 >/dev/null); then
+    echo "$cfg_err" | head -5
+    die "o compose não resolve a configuração (erro acima). NÃO subimos às cegas."
+  fi
+
   local publicadas
-  publicadas=$(docker compose config --format json 2>/dev/null \
-    | jq -r '.services.web.ports[]? | "\(.published)|\(.host_ip // "0.0.0.0")"' 2>/dev/null || echo "")
-  [[ -n "$publicadas" ]] || die "não foi possível resolver a configuração do compose (jq instalado?)"
+  publicadas=$(docker compose config --format json \
+    | jq -r '.services.web.ports[]? | "\(.published)|\(.host_ip // "0.0.0.0")"')
+  [[ -n "$publicadas" ]] || die "o serviço web não declarou nenhuma porta — configuração inesperada"
 
   local fora
   fora=$(awk -F'|' '$2 != "127.0.0.1"' <<<"$publicadas" || true)
