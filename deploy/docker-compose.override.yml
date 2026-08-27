@@ -1,33 +1,47 @@
 # Override de isolamento — Web Rádio Porto do Capim
 #
-# RAZÃO DE EXISTIR DESTE ARQUIVO:
-# O docker-compose.yml padrão do AzuraCast publica 80 e 443 em 0.0.0.0.
-# Neste host isso derrubaria o nginx do HestiaCP e, com ele, todos os
-# tenants VotoAqui (câmaras municipais) e o liciteagora.
+# ═══════════════════════════════════════════════════════════════════════
+# LEIA ANTES DE EDITAR. Este arquivo é a única coisa entre o AzuraCast e
+# os sistemas de votação de câmaras municipais que rodam neste host.
+# ═══════════════════════════════════════════════════════════════════════
 #
-# Aqui TODA porta é amarrada a 127.0.0.1. Consequências:
-#   1. Zero conflito com o nginx do Hestia (que segue dono de 80/443).
-#   2. O firewall do host não é contornado. Portas publicadas pelo Docker
-#      entram pela cadeia DOCKER (não pela INPUT), furando o `policy DROP`
-#      do Hestia. Ligando só ao loopback, não há o que furar.
+# O docker-compose.yml de referência do AzuraCast publica 150 linhas de
+# porta no serviço `web`, incluindo:
+#     - '${AZURACAST_HTTP_PORT:-80}:${AZURACAST_HTTP_PORT:-80}'
+#     - '${AZURACAST_HTTPS_PORT:-443}:${AZURACAST_HTTPS_PORT:-443}'
+#     - '8000:8000' ... '8496:8496'
 #
-# O acesso externo passa OBRIGATORIAMENTE pelo vhost do Hestia, que faz
-# proxy reverso e termina o TLS.
+# DUAS ARMADILHAS que já custaram uma versão inteira deste arquivo:
+#
+# 1. `ports` é lista, e listas são CONCATENADAS entre base e override, não
+#    substituídas. Escrever `ports: ['127.0.0.1:8081:80']` aqui SOMA uma
+#    porta e deixa as 150 originais de pé. Por isso usamos a tag `!override`
+#    (Compose >= 2.24), que substitui a lista inteira.
+#
+# 2. `${AZURACAST_HTTP_PORT}` é interpolado pelo Compose a partir do
+#    ambiente ou do arquivo `.env` do projeto — NUNCA de `env_file:`.
+#    Escrever a variável em `azuracast.env` não tem efeito nenhum sobre a
+#    interpolação: ela cai no default 80. O install.sh grava um `.env`
+#    separado justamente por isso.
+#
+# TERCEIRA CAMADA DE DEFESA, fora deste arquivo: /etc/docker/daemon.json
+# com `"ip": "127.0.0.1"`, que faz toda porta publicada sem IP explícito
+# nascer no loopback. Se este override for perdido num upgrade, o daemon
+# ainda segura.
 
 services:
   web:
-    ports:
-      # host:porta -> contêiner:porta  (SEMPRE com o 127.0.0.1 na frente)
-      - '127.0.0.1:8081:80'
+    # !override = descarta a lista do arquivo base em vez de somar a ela.
+    ports: !override
+      - '127.0.0.1:8081:80'      # painel + HLS (proxy do Hestia entra aqui)
+      - '127.0.0.1:8005:8005'    # Icecast da estação porto_do_capim
+      - '127.0.0.1:8010:8010'    # harbor do Liquidsoap (locutor ao vivo)
+      # SFTP e as demais ~145 portas ficam DE FORA de propósito: o que não
+      # é publicado não pode vazar. Para habilitar o SFTP de upload de
+      # mídia, acrescente aqui explicitamente com o 127.0.0.1 na frente.
+
     environment:
-      # AzuraCast precisa saber que está atrás de proxy para montar as URLs
-      # corretas nos manifestos HLS e nos links do painel.
+      # Redundante com o .env, mas deixa o valor visível para quem lê só
+      # este arquivo.
       AZURACAST_HTTP_PORT: 8081
       AZURACAST_HTTPS_PORT: 0
-
-  stations:
-    ports:
-      # Faixa de portas das estações (Icecast + harbor do Liquidsoap).
-      # 8005 = Icecast da estação porto_do_capim
-      # 8010 = harbor (entrada do locutor ao vivo)
-      - '127.0.0.1:8005-8025:8005-8025'

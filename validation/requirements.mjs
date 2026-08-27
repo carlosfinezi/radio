@@ -12,11 +12,30 @@ import {
   concurrentListeners, azuraApi,
 } from './lib/probe.mjs';
 
+/**
+ * Aspas seguras para interpolação em shell.
+ *
+ * `cfg.station`, `cfg.container` e `cfg.uptimeLog` vêm de variáveis de
+ * ambiente e caem dentro de comandos executados como root. Um
+ * `AZC_STATION='x; rm -rf /'` era executado literalmente. Aspas simples com
+ * escape do próprio apóstrofo é a forma canônica de neutralizar isso.
+ */
+const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
 const MIN_KBPS = 128;
 const MIN_STORAGE_GB = 50;
 const SLA_TARGET = 99.0;
 
-/** Tolerância de medição: encoders VBR/CBR oscilam ~4% entre janelas. */
+/**
+ * Tolerância de medição: encoders oscilam entre janelas de amostragem.
+ *
+ * ATENÇÃO NA LEITURA DO LAUDO: com 0.96 o limiar efetivo vira 122,88 kbps
+ * para um edital que exige "mínima de 128 kbps". Um encoder configurado a
+ * 123 kbps sairia aprovado. A tolerância existe porque a medição real tem
+ * jitter (medido: 110-150 kbps em janelas de 1s, convergindo a 128,4 em 12s),
+ * mas o valor medido é sempre impresso na evidência justamente para que o
+ * auditor veja o número, não só o ✅.
+ */
 const KBPS_TOLERANCE = 0.96;
 
 export const requirements = [
@@ -44,32 +63,56 @@ export const requirements = [
         name: 'Política de reinício automático configurada (resistência a reboot)',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(
-            `docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}' $(docker ps -q) 2>/dev/null || true`
+          // Filtra pelo projeto compose do AzuraCast. Este host é
+          // multi-tenant: inspecionar `docker ps -q` inteiro faria um
+          // contêiner alheio sem restart-policy reprovar a rádio.
+          const r = await sh(
+            `docker ps -q --filter "label=com.docker.compose.project=azuracast" ` +
+            `| xargs -r docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}'`
           );
-          const lines = out.trim().split('\n').filter(Boolean);
+          if (!r.ok) {
+            return { pass: false, evidence: `não foi possível inspecionar os contêineres: ${r.err || 'docker indisponível'}` };
+          }
+          const lines = r.out.trim().split('\n').filter(Boolean);
           const bad = lines.filter((l) => !/(always|unless-stopped)$/.test(l));
           return {
             pass: lines.length > 0 && bad.length === 0,
             evidence: lines.length
-              ? `${lines.length} contêiner(es); ${bad.length} sem restart automático`
-              : 'nenhum contêiner encontrado',
+              ? `${lines.length} contêiner(es) do AzuraCast; ${bad.length} sem restart automático`
+              : 'nenhum contêiner do projeto azuracast em execução',
             detail: { containers: lines, semRestart: bad },
           };
         },
       },
       {
         id: 'a3',
-        name: 'Continuidade sob falha de fonte (fallback do AutoDJ)',
+        name: 'Continuidade sob falha de fonte: fallback do AutoDJ configurado',
         critical: true,
-        async run({ cfg }) {
-          // O Liquidsoap deve ter fallback encadeado. Sem fonte ao vivo,
-          // a playlist tem que estar no ar — é isso que "ininterrupto" significa.
-          const m = await measureIcyBitrate(cfg.streamUrl, 6);
+        async run({ cfg, sh }) {
+          // ATENÇÃO AO ESCOPO DESTE CHECK.
+          // A versão anterior media o bitrate de novo e concluía "o AutoDJ
+          // assumiu" — sem jamais desconectar a fonte ao vivo. Era um clone
+          // do a1/b1 com legenda enganosa.
+          //
+          // Derrubar a fonte de propósito tiraria a rádio do ar, então aqui
+          // verificamos o que dá para verificar sem causar dano: que o
+          // Liquidsoap tem cadeia de fallback declarada. O teste de verdade
+          // (cortar a fonte e cronometrar a retomada) é de homologação, com
+          // janela combinada — está no RUNBOOK.
+          const r = await sh(
+            `docker exec ${q(cfg.container)} cat ${q(`/var/azuracast/stations/${cfg.station}/config/liquidsoap.liq`)} 2>/dev/null`
+          );
+          if (!r.ok || !r.out.trim()) {
+            return { pass: false, evidence: `não foi possível ler a configuração do Liquidsoap: ${r.err || 'arquivo ausente'}` };
+          }
+          const temFallback = /\bfallback\s*\(/.test(r.out);
+          const temSafe = /single\(|blank\(|safe_blank/.test(r.out);
           return {
-            pass: m.kbps > 1,
-            evidence: `sem fonte ao vivo, o stream segue a ${m.kbps.toFixed(1)} kbps (AutoDJ assumiu)`,
-            detail: { kbps: m.kbps },
+            pass: temFallback,
+            evidence: temFallback
+              ? `cadeia de fallback presente na configuração${temSafe ? ' (com fonte de emergência)' : ' — SEM fonte de emergência final'}`
+              : 'nenhuma cadeia de fallback: se a fonte cair, a rádio sai do ar',
+            detail: { temFallback, temSafe },
           };
         },
       },
@@ -182,6 +225,42 @@ export const requirements = [
         },
       },
       {
+        id: 'c5',
+        name: 'Player web existe e funciona nos navegadores que NÃO tocam HLS',
+        critical: true,
+        async run({ cfg, sh }) {
+          // Chrome, Firefox e Edge não reproduzem HLS nativamente — só Safari
+          // e iOS. Validar o manifesto (check c1) prova compatibilidade com
+          // Safari, NÃO com "navegadores web" como a alínea (c) exige.
+          // Sem hls.js ou sem um caminho MP3, a maioria dos ouvintes fica sem som.
+          const r = await sh(`cat /root/webradio/web/player.html`);
+          if (!r.ok || !r.out.trim()) {
+            return { pass: false, evidence: 'player web AUSENTE — a alínea (c) exige reprodução por navegador' };
+          }
+          const temHlsJs = /hls\.min\.js|Hls\.isSupported/.test(r.out);
+          const temFallbackMp3 = /radio\.mp3|streamIcy|MP3_URL/.test(r.out);
+
+          // E o MP3 precisa ser de fato consumível por navegador.
+          let mp3Ok = false, mp3Detalhe = '';
+          try {
+            const h = await fetch(cfg.streamUrl, { method: 'GET', headers: { Range: 'bytes=0-1024' } });
+            const ct = h.headers.get('content-type') || '';
+            mp3Ok = h.ok && /audio\/(mpeg|mp3|aac)/.test(ct);
+            mp3Detalhe = `HTTP ${h.status}, Content-Type: ${ct}`;
+            try { h.body?.cancel(); } catch { /* ignora */ }
+          } catch (e) {
+            mp3Detalhe = `falhou: ${e.message}`;
+          }
+
+          return {
+            pass: temHlsJs && temFallbackMp3 && mp3Ok,
+            evidence: `player web presente (hls.js=${temHlsJs}, fallback MP3=${temFallbackMp3}); ` +
+              `endpoint MP3: ${mp3Detalhe}`,
+            detail: { temHlsJs, temFallbackMp3, mp3Ok },
+          };
+        },
+      },
+      {
         id: 'c4',
         name: 'Metadados "tocando agora" expostos publicamente',
         critical: false,
@@ -211,19 +290,40 @@ export const requirements = [
         name: 'Nenhum teto de ouvintes configurado no servidor',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(
-            `docker exec ${cfg.container} cat /var/azuracast/stations/${cfg.station}/config/icecast.xml 2>/dev/null | grep -iE '<(clients|sources|max_listeners)>' || true`
+          const r = await sh(
+            `docker exec ${q(cfg.container)} cat ${q(`/var/azuracast/stations/${cfg.station}/config/icecast.xml`)}`
           );
-          const clients = /<clients>(\d+)<\/clients>/i.exec(out);
-          const n = clients ? Number(clients[1]) : null;
-          // O Icecast exige um número; o que importa é ser alto o bastante
-          // para não ser o gargalo antes da porta de rede saturar.
+          // Sem conseguir ler a configuração, NÃO SE SABE se há limite.
+          // "Não sei" jamais pode virar PASS num laudo contratual.
+          if (!r.ok || !r.out.trim()) {
+            return {
+              pass: false,
+              evidence: `não foi possível ler o icecast.xml: ${r.err || 'saída vazia'} — impossível afirmar que não há teto de ouvintes`,
+            };
+          }
+
+          const num = (tag) => {
+            const m = new RegExp(`<${tag}>\\s*(\\d+)\\s*</${tag}>`, 'i').exec(r.out);
+            return m ? Number(m[1]) : null;
+          };
+          // `max_listeners` é o teto POR ESTAÇÃO no AzuraCast — a versão
+          // anterior mencionava a tag no grep mas só extraía <clients>,
+          // então um teto restritivo passava despercebido.
+          const clients = num('clients');
+          const maxListeners = num('max-listeners') ?? num('max_listeners');
+
+          const limites = [];
+          if (clients !== null && clients < 5000) limites.push(`<clients>${clients}</clients>`);
+          if (maxListeners !== null && maxListeners > 0 && maxListeners < 5000) {
+            limites.push(`<max-listeners>${maxListeners}</max-listeners>`);
+          }
+
           return {
-            pass: n === null || n >= 5000,
-            evidence: n === null
-              ? 'sem limite explícito de clientes'
-              : `<clients>${n}</clients> — ${n >= 5000 ? 'acima do limite físico da porta de rede' : 'ABAIXO do necessário; vira gargalo antes da banda'}`,
-            detail: { clients: n, raw: out.trim() },
+            pass: limites.length === 0,
+            evidence: limites.length === 0
+              ? `sem teto restritivo (clients=${clients ?? 'ausente'}, max-listeners=${maxListeners ?? 'ilimitado'}); o gargalo passa a ser a banda, não a configuração`
+              : `TETO CONFIGURADO: ${limites.join(', ')} — vira gargalo antes da banda saturar`,
+            detail: { clients, maxListeners },
           };
         },
       },
@@ -284,16 +384,27 @@ export const requirements = [
           // O `-d` antes de cada df é proposital: `df ausente | tail -1` tem
           // exit code do `tail` (zero), então um `||` encadeado nunca dispara
           // e o resultado sai 0 GB — falso negativo silencioso.
-          const out = await sh(
+          const r = await sh(
             `for d in /var/azuracast/stations /var/lib/docker /; do ` +
-            `  if [ -d "$d" ]; then df -BG --output=avail "$d" | tail -1; break; fi; ` +
+            `  if [ -d "$d" ]; then df -BG --output=avail,target "$d" | tail -1; break; fi; ` +
             `done`
           );
-          const availGb = Number((out.match(/(\d+)G/) || [])[1] || 0);
+          const availGb = Number((r.out.match(/(\d+)G/) || [])[1] || 0);
+          const volume = (r.out.trim().split(/\s+/)[1]) || '?';
+
+          // DISTINÇÃO QUE O EDITAL FAZ E ESTE CHECK NÃO CONSEGUE FAZER SOZINHO:
+          // a alínea (e) pede 50 GB *de armazenamento disponibilizado*, que é
+          // alocação. `df` mede sobra momentânea num volume compartilhado com
+          // HestiaCP, VotoAqui e liciteagora. 50 GB livres hoje não são 50 GB
+          // reservados. A garantia real exige volume dedicado (ou cota de
+          // filesystem) — por isso o resultado sai marcado como parcial.
+          const dedicado = volume.startsWith('/var/azuracast');
           return {
             pass: availGb >= MIN_STORAGE_GB,
-            evidence: `${availGb} GB disponíveis no volume de mídia (mínimo ${MIN_STORAGE_GB} GB)`,
-            detail: { availGb, required: MIN_STORAGE_GB },
+            manual: availGb >= MIN_STORAGE_GB && !dedicado,
+            evidence: `${availGb} GB livres em ${volume} (mínimo ${MIN_STORAGE_GB} GB)` +
+              (dedicado ? ' — volume dedicado' : ' — VOLUME COMPARTILHADO: espaço livre não é alocação garantida'),
+            detail: { availGb, volume, dedicado, required: MIN_STORAGE_GB },
           };
         },
       },
@@ -334,9 +445,14 @@ export const requirements = [
           const r = await azuraApi(cfg.baseUrl, cfg.apiKey, `/api/station/${cfg.station}/playlists`);
           const pls = Array.isArray(r.json) ? r.json : [];
           const agendadas = pls.filter((p) => p.type === 'scheduled' || (p.schedule_items || []).length > 0);
+          // A versão anterior era `pass: r.status === 200` — ou seja, a API
+          // responder já aprovava "agendamento configurado", mesmo com zero
+          // playlists agendadas. O check ignorava o próprio resultado.
           return {
-            pass: r.status === 200,
-            evidence: `${agendadas.length} playlist(s) com grade horária configurada`,
+            pass: r.status === 200 && agendadas.length > 0,
+            evidence: r.status !== 200
+              ? `API respondeu HTTP ${r.status}`
+              : `${agendadas.length} playlist(s) com grade horária configurada`,
             detail: { agendadas: agendadas.map((p) => p.name) },
           };
         },
@@ -470,12 +586,18 @@ export const requirements = [
         name: 'Relatório mensal de audiência gerável em formato entregável',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(`test -f /root/webradio/reports/sla-report.mjs && echo OK || echo FALTA`);
+          // Não basta o arquivo existir: um gerador que estoura ao rodar não
+          // gera relatório nenhum. Executamos de fato, contra o log real.
+          const mes = new Date().toISOString().slice(0, 7);
+          const r = await sh(
+            `UPTIME_LOG=${q(cfg.uptimeLog)} node /root/webradio/reports/sla-report.mjs --month ${mes} 2>&1 | head -40`
+          );
+          const gerou = /Disponibilidade|Relatório Mensal/.test(r.out);
           return {
-            pass: out.includes('OK'),
-            evidence: out.includes('OK')
-              ? 'gerador de relatório presente (reports/sla-report.mjs)'
-              : 'gerador de relatório AUSENTE',
+            pass: gerou,
+            evidence: gerou
+              ? `gerador executado com sucesso para ${mes}`
+              : `gerador falhou ao executar: ${r.out.slice(0, 200) || r.err}`,
           };
         },
       },
@@ -490,25 +612,58 @@ export const requirements = [
     checks: [
       {
         id: 'h1',
-        name: 'Código-fonte do app presente e íntegro',
+        name: 'Projeto compila para Android e iOS (esqueleto nativo presente)',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(`ls /root/webradio/app/lib/*.dart /root/webradio/app/pubspec.yaml 2>/dev/null | wc -l`);
+          // Contar arquivos .dart NÃO prova que existe app. Sem os projetos
+          // nativos não há APK nem IPA, e sem as chaves de plataforma o áudio
+          // em segundo plano — que é o coração do requisito — não funciona.
+          const A = '/root/webradio/app';
+          const r = await sh(
+            `for p in android/app/src/main/AndroidManifest.xml ios/Runner/Info.plist pubspec.yaml lib/main.dart; do ` +
+            `  [ -f "${A}/$p" ] && echo "OK $p" || echo "FALTA $p"; done`
+          );
+          const faltando = r.out.split('\n').filter((l) => l.startsWith('FALTA')).map((l) => l.slice(6));
+
+          // As chaves de plataforma sem as quais o áudio para com a tela bloqueada.
+          const chaves = await sh(
+            `grep -l 'UIBackgroundModes' ${A}/ios/Runner/Info.plist 2>/dev/null; ` +
+            `grep -l 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' ${A}/android/app/src/main/AndroidManifest.xml 2>/dev/null`
+          );
+          const nChaves = chaves.out.trim().split('\n').filter(Boolean).length;
+
           return {
-            pass: Number(out.trim()) >= 2,
-            evidence: `${out.trim()} arquivo(s) do projeto Flutter encontrados`,
+            pass: faltando.length === 0 && nChaves === 2,
+            evidence: faltando.length
+              ? `NÃO COMPILA — ausentes: ${faltando.join(', ')}`
+              : nChaves < 2
+                ? 'projetos nativos presentes, mas faltam chaves de áudio em segundo plano (UIBackgroundModes / FOREGROUND_SERVICE_MEDIA_PLAYBACK)'
+                : 'projetos Android e iOS presentes, com chaves de reprodução em segundo plano',
+            detail: { faltando, chavesDePlataforma: nChaves },
           };
         },
       },
       {
         id: 'h2',
-        name: 'App consome o mesmo endpoint HLS validado nas alíneas b/c',
+        name: 'App aponta para o mesmo host validado nas alíneas b/c',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(`grep -rl "${new URL(cfg.hlsUrl).host}" /root/webradio/app/ 2>/dev/null | head -3 || true`);
+          // Comparação real entre o host medido e o host compilado no app.
+          // Um grep pelo host do validador seria auto-referencial e falharia
+          // sempre que AZC_BASE_URL não fosse editado junto com o config.dart.
+          const r = await sh(
+            `grep -oP "static const String host = '\\K[^']+" /root/webradio/app/lib/config.dart`
+          );
+          const hostApp = r.out.trim();
+          const hostValidado = new URL(cfg.hlsUrl).host;
           return {
-            pass: out.trim().length > 0,
-            evidence: out.trim() ? `endpoint referenciado em: ${out.trim().split('\n').join(', ')}` : 'app não referencia o host do stream',
+            pass: !!hostApp && hostApp === hostValidado,
+            evidence: !hostApp
+              ? 'não foi possível ler o host de app/lib/config.dart'
+              : hostApp === hostValidado
+                ? `app e validação apontam para ${hostApp}`
+                : `DIVERGÊNCIA: app aponta para "${hostApp}", validação mediu "${hostValidado}" — o app entrega algo diferente do auditado`,
+            detail: { hostApp, hostValidado },
           };
         },
       },
@@ -537,15 +692,44 @@ export const requirements = [
     checks: [
       {
         id: 'i1',
-        name: 'Monitoramento de disponibilidade ativo e coletando',
+        name: 'Monitoramento de disponibilidade ativo, coletando e SEM lacunas',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(`test -f ${cfg.uptimeLog} && wc -l < ${cfg.uptimeLog} || echo 0`);
-          const n = Number(out.trim()) || 0;
+          const { existsSync, readFileSync } = await import('node:fs');
+          if (!existsSync(cfg.uptimeLog)) {
+            return { pass: false, evidence: `log de disponibilidade ausente em ${cfg.uptimeLog}` };
+          }
+          const linhas = readFileSync(cfg.uptimeLog, 'utf8').split('\n').slice(1).filter(Boolean);
+          if (linhas.length < 2) {
+            return { pass: false, evidence: `apenas ${linhas.length} amostra(s) — insuficiente para apurar SLA` };
+          }
+
+          // O monitor precisa estar VIVO. Log antigo com muitas amostras
+          // aprovaria o check enquanto o serviço está morto há uma semana.
+          const ultima = new Date(linhas[linhas.length - 1].split(',')[0]);
+          if (isNaN(ultima)) {
+            return { pass: false, evidence: 'última linha do log tem timestamp inválido' };
+          }
+          const minutosDesde = (Date.now() - ultima.getTime()) / 60000;
+
+          // Timestamp no FUTURO é corrupção de dados (relógio errado, log
+          // sintético, fuso trocado) e não pode ser lido como "recentíssimo".
+          // A comparação ingênua `minutosDesde < 30` aprovava -5116 min.
+          if (minutosDesde < -2) {
+            return {
+              pass: false,
+              evidence: `última amostra está ${Math.abs(minutosDesde).toFixed(0)} min NO FUTURO — ` +
+                'log corrompido ou relógio dessincronizado; laudo não confiável',
+              detail: { minutosDesdeUltima: minutosDesde },
+            };
+          }
+
+          const atual = minutosDesde < 30;
           return {
-            pass: n > 0,
-            evidence: `${n} amostra(s) de disponibilidade registradas em ${cfg.uptimeLog}`,
-            detail: { amostras: n },
+            pass: atual,
+            evidence: `${linhas.length} amostras; última há ${minutosDesde.toFixed(0)} min` +
+              (atual ? '' : ' — MONITOR PARADO, o SLA apurado está desatualizado'),
+            detail: { amostras: linhas.length, minutosDesdeUltima: minutosDesde },
           };
         },
       },
@@ -553,30 +737,66 @@ export const requirements = [
         id: 'i2',
         name: `Disponibilidade apurada >= ${SLA_TARGET}%`,
         critical: true,
-        async run({ cfg, sh }) {
-          const out = await sh(
-            `awk -F, 'NF>=2{t++; if($2=="up") u++} END{if(t>0) printf "%.4f %d %d", (u/t)*100, u, t; else printf "0 0 0"}' ${cfg.uptimeLog} 2>/dev/null || echo "0 0 0"`
-          );
-          const [pct, up, total] = out.trim().split(/\s+/).map(Number);
+        async run({ cfg }) {
+          const { existsSync, readFileSync } = await import('node:fs');
+          if (!existsSync(cfg.uptimeLog)) {
+            return { pass: false, manual: true, evidence: 'sem log de disponibilidade — SLA não apurável' };
+          }
+          const linhas = readFileSync(cfg.uptimeLog, 'utf8').split('\n').slice(1).filter(Boolean);
+          const amostras = linhas
+            .map((l) => { const [ts, estado] = l.split(','); return { t: new Date(ts), up: estado === 'up' }; })
+            .filter((a) => !isNaN(a.t));
+
+          if (amostras.length < 2) {
+            return { pass: false, manual: true, evidence: 'amostras insuficientes' };
+          }
+
+          const up = amostras.filter((a) => a.up).length;
+          const total = amostras.length;
+          const pct = (up / total) * 100;
+
+          // INTEGRIDADE DO LAUDO: se o monitor ficou parado, as amostras que
+          // faltam somem da conta e o percentual sai inflado. Uma queda que
+          // derrube o próprio monitor viraria SLA perfeito. Detectamos lacunas
+          // comparando o intervalo entre amostras com a mediana observada.
+          const deltas = [];
+          for (let i = 1; i < amostras.length; i++) {
+            deltas.push(amostras[i].t - amostras[i - 1].t);
+          }
+          const mediana = deltas.slice().sort((a, b) => a - b)[Math.floor(deltas.length / 2)] || 0;
+          const lacunas = deltas.filter((d) => mediana > 0 && d > mediana * 5);
+          const msPerdidos = lacunas.reduce((s, d) => s + d, 0);
+          const amostrasPerdidas = mediana > 0 ? Math.round(msPerdidos / mediana) : 0;
+
+          const integro = lacunas.length === 0;
           return {
-            pass: total > 0 && pct >= SLA_TARGET,
-            evidence: total > 0
-              ? `${pct.toFixed(4)}% de disponibilidade (${up}/${total} amostras)`
-              : 'sem amostras suficientes — o monitor precisa rodar antes de apurar SLA',
-            manual: total === 0,
-            detail: { pct, up, total, alvo: SLA_TARGET },
+            pass: pct >= SLA_TARGET && integro,
+            manual: !integro,
+            evidence: `${pct.toFixed(4)}% (${up}/${total} amostras)` +
+              (integro
+                ? ''
+                : ` — ⚠️ ${lacunas.length} LACUNA(S) no monitoramento, ~${amostrasPerdidas} amostras ausentes. ` +
+                  'Amostra ausente não é amostra "no ar": o percentual acima está otimista e não serve como laudo.'),
+            detail: { pct, up, total, alvo: SLA_TARGET, lacunas: lacunas.length, amostrasPerdidas },
           };
         },
       },
       {
         id: 'i3',
-        name: 'Redundância: existe segundo nó de entrega',
-        critical: true,
+        // NÃO-CRÍTICO POR DECISÃO DELIBERADA: o edital exige 99% de
+        // disponibilidade, não exige segundo nó. Marcar como crítico fazia a
+        // suíte imprimir "não conforme ao edital" e sair com código 1 por um
+        // requisito que o edital não contém — um falso negativo que
+        // desqualificaria a própria proposta.
+        // Fica como recomendação de engenharia, que é o que de fato é.
+        name: 'Redundância: segundo nó de entrega (recomendado, não exigido pelo edital)',
+        critical: false,
         async run({ cfg }) {
           if (!cfg.edgeUrl) {
             return {
               pass: false,
-              evidence: 'EDGE_URL não configurado — sem redundância, um único reboot mensal já consome os 7h18 de margem do SLA de 99%',
+              evidence: 'EDGE_URL não configurado. O edital não exige redundância, ' +
+                'mas sem ela um único reboot mensal já consome boa parte dos 7h12min de margem do SLA de 99%',
             };
           }
           const r = await fetchText(cfg.edgeUrl);
@@ -601,38 +821,54 @@ export const requirements = [
         name: 'Runbook de incidentes documentado',
         critical: true,
         async run({ sh }) {
-          const out = await sh(`test -f /root/webradio/docs/RUNBOOK.md && wc -l < /root/webradio/docs/RUNBOOK.md || echo 0`);
-          const n = Number(out.trim()) || 0;
+          const r = await sh(`wc -l < /root/webradio/docs/RUNBOOK.md`);
+          const n = Number(r.out.trim()) || 0;
           return {
-            pass: n > 30,
-            evidence: n > 0 ? `runbook com ${n} linhas` : 'RUNBOOK.md ausente',
+            pass: r.ok && n > 30,
+            evidence: r.ok ? `runbook com ${n} linhas` : 'RUNBOOK.md ausente',
           };
         },
       },
       {
         id: 'j2',
-        name: 'Alertas automáticos de queda configurados',
+        name: 'Alertas automáticos de queda EM EXECUÇÃO',
         critical: true,
         async run({ cfg, sh }) {
-          const out = await sh(`test -f /root/webradio/reports/uptime-monitor.mjs && echo OK || echo FALTA`);
+          // A versão anterior só fazia `test -f` no monitor. Um arquivo no
+          // disco não alerta ninguém: o monitor precisa estar rodando como
+          // serviço E com um comando de alerta configurado. Sem as duas
+          // coisas, o "suporte" da alínea (j) não existe na prática.
+          const svc = await sh(`systemctl is-active webradio-monitor.service 2>/dev/null`);
+          const ativo = svc.out.trim() === 'active';
+
+          const proc = await sh(`pgrep -fa 'uptime-monitor.mjs' | head -3`);
+          const rodando = proc.ok && proc.out.trim().length > 0;
+          const temAlerta = /--alert-cmd|ALERT_CMD/.test(proc.out);
+
           return {
-            pass: out.includes('OK'),
-            evidence: out.includes('OK') ? 'monitor com alerta presente' : 'monitor de uptime ausente',
+            pass: (ativo || rodando) && temAlerta,
+            evidence: !(ativo || rodando)
+              ? 'monitor NÃO está em execução — nenhuma queda será detectada nem alertada'
+              : temAlerta
+                ? `monitor ativo (${ativo ? 'systemd' : 'processo avulso'}) com alerta configurado`
+                : 'monitor em execução mas SEM --alert-cmd: registra a queda e não avisa ninguém',
+            detail: { systemd: ativo, processo: rodando, temAlerta },
           };
         },
       },
       {
         id: 'j3',
         name: 'Backup restaurável comprovado',
-        critical: true,
+        critical: false, // fora do texto do edital; mantido como boa prática
         manual: true,
         async run({ cfg, sh }) {
-          const out = await sh(`test -f /root/webradio/deploy/backup.sh && echo OK || echo FALTA`);
+          const r = await sh(`test -f /root/webradio/deploy/backup.sh`);
           return {
             pass: false,
             manual: true,
-            evidence: out.includes('OK')
-              ? 'script de backup presente, mas RESTAURAÇÃO ainda não foi testada em ambiente limpo — exigir teste trimestral'
+            evidence: r.ok
+              ? 'script de backup presente, mas RESTAURAÇÃO nunca foi testada em ambiente limpo. ' +
+                'Backup não restaurado não é backup — ver rotina trimestral no RUNBOOK.'
               : 'script de backup ausente',
           };
         },

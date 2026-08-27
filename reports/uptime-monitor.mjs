@@ -73,9 +73,22 @@ async function sample() {
 let consecutiveFails = 0;
 let alerted = false;
 
+/**
+ * Escapa um campo para CSV.
+ *
+ * Mensagens de erro de TLS e AggregateError são MULTILINHA. Gravadas cruas,
+ * quebravam a linha em duas dentro de um arquivo append-only que o relatório
+ * de SLA lê por linha — a amostra virava dois registros corrompidos, num
+ * documento que "qualquer auditor abre no Excel".
+ */
+function csv(v) {
+  const s = String(v ?? '').replace(/[\r\n]+/g, ' ').trim();
+  return `"${s.replace(/"/g, '""')}"`;   // aspas duplicadas: escape padrão RFC 4180
+}
+
 async function tick() {
   const s = await sample();
-  const line = `${new Date().toISOString()},${s.up ? 'up' : 'down'},${s.latency},"${s.detail.replace(/"/g, "'")}"\n`;
+  const line = `${new Date().toISOString()},${s.up ? 'up' : 'down'},${s.latency},${csv(s.detail)}\n`;
   appendFileSync(CFG.logPath, line);
   process.stdout.write(`${s.up ? '\x1b[32m● up  \x1b[0m' : '\x1b[31m● DOWN\x1b[0m'} ${s.latency}ms  ${s.detail}\n`);
 

@@ -41,7 +41,13 @@ class _SchedulePageState extends State<SchedulePage> {
   Widget build(BuildContext context) {
     return SafeArea(
       child: RefreshIndicator(
-        onRefresh: () async => setState(() => _futuro = _carregar()),
+        // Precisa AGUARDAR o fetch: `() async => setState(...)` retorna
+        // imediatamente e o indicador some antes dos dados chegarem.
+        onRefresh: () async {
+          final novo = _carregar();
+          setState(() => _futuro = novo);
+          await novo.catchError((_) => <_Programa>[]);
+        },
         child: FutureBuilder<List<_Programa>>(
           future: _futuro,
           builder: (context, snap) {

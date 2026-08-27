@@ -1,9 +1,8 @@
-# Template nginx do HestiaCP para o site da Web Rádio.
+# Template nginx HTTPS do HestiaCP — Web Rádio.
+# Instalar em: /usr/local/hestia/data/templates/web/nginx/php-fpm/webradio.stpl
 #
-# Instalar como template do usuário e aplicar ao domínio:
-#   /usr/local/hestia/data/templates/web/nginx/php-fpm/webradio.tpl
-#   /usr/local/hestia/data/templates/web/nginx/php-fpm/webradio.stpl  (idêntico, bloco SSL)
-#
+# O par HTTP fica em webradio.tpl (com o bloco do desafio ACME).
+# NÃO gerar um a partir do outro por sed: foi assim que o Let's Encrypt quebrou.
 # As variáveis %ip%, %domain%, %ssl_pem% etc. são substituídas pelo Hestia.
 
 server {
@@ -80,8 +79,12 @@ server {
         proxy_http_version 1.1;
 
         # O painel usa WebSocket para o "tocando agora" em tempo real.
+        # `Connection "upgrade"` fixo quebraria keep-alive em toda requisição
+        # normal. Repassando $http_upgrade, o cabeçalho é omitido quando
+        # vazio e só vira "upgrade" no handshake de WebSocket. (O ideal seria
+        # um `map` em contexto http, que o template do Hestia não comporta.)
         proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection $http_upgrade;
 
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;

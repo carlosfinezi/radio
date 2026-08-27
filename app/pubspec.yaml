@@ -4,7 +4,10 @@ publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.4.0 <4.0.0'
+  # just_audio 0.10.6 e audio_service 0.18.19 exigem ambos sdk ^3.6.0 e
+  # Flutter >=3.27.0. Declarar 3.4.0 fazia o `pub get` não resolver.
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: '>=3.27.0'
 
 dependencies:
   flutter:
@@ -17,12 +20,16 @@ dependencies:
   # Controles de tela de bloqueio, notificação, Android Auto e CarPlay.
   # Licença MIT.
   #
-  # NOTA DE LICENCIAMENTO: descartamos react_native_track_player /
-  # audio_service equivalentes de licença comercial. A v5+ do
-  # react-native-track-player exige licença paga para uso comercial, e este
-  # é um contrato remunerado. just_audio + audio_service são as alternativas
-  # sem ônus e sem risco jurídico.
+  # NOTA DE LICENCIAMENTO: descartamos react-native-track-player. A v5+ exige
+  # licença comercial paga para uso comercial, e este é um contrato
+  # remunerado. just_audio (Apache-2.0/MIT) + audio_service (MIT) são as
+  # alternativas sem ônus e sem risco jurídico.
   audio_service: ^0.18.19
+
+  # Tratamento de interrupções (ligação telefônica, outro app tomando o
+  # áudio, fone desconectado). Sem isto o stream fica mudo após uma chamada
+  # e o estado continua dizendo "tocando" — rejeição comum de app de mídia.
+  audio_session: ^0.1.21
 
   http: ^1.2.0
   intl: ^0.19.0
@@ -34,5 +41,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/
+  # NÃO declarar `assets:` sem que o diretório exista: o build aborta com
+  # "unable to find directory entry in pubspec.yaml". Reative a linha abaixo
+  # junto com a criação de app/assets/ (logotipo, ícone da emissora).
+  # assets:
+  #   - assets/

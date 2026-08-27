@@ -159,8 +159,12 @@ class PlayerPage extends StatelessWidget {
                           ? const Center(child: CircularProgressIndicator())
                           : IconButton.filled(
                               iconSize: 48,
+                              // pause() (e não stop()) mantém a sessão de
+                              // mídia viva, para que o botão do fone, do
+                              // carro e da tela de bloqueio continuem
+                              // funcionando depois de parar.
                               onPressed: () => tocando
-                                  ? audioHandler.stop()
+                                  ? audioHandler.pause()
                                   : audioHandler.play(),
                               icon: Icon(tocando ? Icons.stop : Icons.play_arrow),
                             ),
@@ -222,7 +226,9 @@ class AboutPage extends StatelessWidget {
           const ListTile(
             leading: Icon(Icons.language),
             title: Text('Ouça pelo navegador'),
-            subtitle: Text('https://${Config.host}'),
+            // Aponta para o PLAYER público, não para a raiz do domínio —
+            // a raiz é o painel administrativo do AzuraCast.
+            subtitle: Text(Config.playerWebUrl),
           ),
         ],
       ),

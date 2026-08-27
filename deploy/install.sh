@@ -2,12 +2,14 @@
 #
 # Instalação isolada do AzuraCast — Web Rádio Porto do Capim
 #
-# Desenho: AzuraCast roda em Docker, amarrado a 127.0.0.1. O acesso público
-# vem de um SITE NOVO E SEPARADO no HestiaCP, que faz proxy reverso e termina
-# o TLS. O nginx do Hestia continua dono exclusivo das portas 80 e 443.
+# Desenho: AzuraCast em Docker, TODA porta amarrada a 127.0.0.1. O acesso
+# público vem de um site novo e separado no HestiaCP, que faz proxy reverso e
+# termina o TLS. O nginx do Hestia segue dono exclusivo de 80 e 443.
 #
-# Este script é IDEMPOTENTE e para no primeiro erro.
-# Não roda nada destrutivo sem confirmação explícita.
+# CONTEXTO DE RISCO: este host serve sistemas de votação de câmaras municipais
+# (tenants VotoAqui) e o liciteagora. Um erro aqui não é um deploy quebrado, é
+# uma cidade sem sessão legislativa. Daí o pré-voo extenso e as três camadas de
+# isolamento (daemon.json + !override + verificação pós-subida).
 #
 # Uso:
 #   DOMAIN=radio.exemplo.br HESTIA_USER=carlosfinezi ./install.sh --check
@@ -18,9 +20,11 @@ set -Eeuo pipefail
 DOMAIN="${DOMAIN:-}"
 HESTIA_USER="${HESTIA_USER:-carlosfinezi}"
 AZC_DIR="${AZC_DIR:-/var/azuracast}"
-MEDIA_MIN_GB=50            # alínea (e) do edital
-DISK_HEADROOM_GB=25        # folga além da mídia, para não repetir incidentes de disco cheio
+MEDIA_MIN_GB=50
+DISK_HEADROOM_GB=25
 MODE="${1:---check}"
+AQUI="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+V=/usr/local/hestia/bin
 
 RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; BLD=$'\e[1m'; RST=$'\e[0m'
 ok()   { echo "${GRN}✓${RST} $*"; }
@@ -29,87 +33,130 @@ die()  { echo "${RED}✗ $*${RST}" >&2; exit 1; }
 step() { echo; echo "${BLD}── $* ──${RST}"; }
 
 # ─────────────────────────────────────────────────────────────────────────
-# Pré-voo: tudo que pode dar errado, verificado ANTES de mudar qualquer coisa
-# ─────────────────────────────────────────────────────────────────────────
 preflight() {
   step "Pré-voo"
   [[ $EUID -eq 0 ]] || die "precisa rodar como root"
   [[ -n "$DOMAIN" ]] || die "defina DOMAIN=radio.seudominio.br"
+  [[ "$DOMAIN" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]] || die "DOMAIN '$DOMAIN' não parece um domínio válido"
 
-  # 1. As portas 80/443 são do Hestia e assim devem permanecer.
-  local port_owner
-  port_owner=$(ss -lntp 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $6}' | head -1)
-  if [[ "$port_owner" == *nginx* ]]; then
-    ok "80/443 pertencem ao nginx do Hestia — o AzuraCast não vai encostar neles"
+  # ── Guarda contra sequestro de domínio em produção ────────────────────
+  # A versão anterior dizia "domínio já existe" e seguia adiante trocando o
+  # template e refazendo o vhost. `DOMAIN=votoaqui.com.br ./install.sh
+  # --apply` teria apontado o apex do VotoAqui para o AzuraCast.
+  if $V/v-list-web-domain "$HESTIA_USER" "$DOMAIN" >/dev/null 2>&1; then
+    # O template é o campo TPL. Extrair por posição em `plain` pegava o IP.
+    # Falhava fechado (bloqueava tudo), mas por acidente, não por desenho.
+    local tpl
+    tpl=$($V/v-list-web-domain "$HESTIA_USER" "$DOMAIN" json 2>/dev/null \
+          | jq -r '.[].TPL // empty' 2>/dev/null | head -1)
+    [[ -n "$tpl" ]] || tpl="(desconhecido)"
+    if [[ "$tpl" != "webradio" ]]; then
+      die "o domínio '$DOMAIN' JÁ EXISTE neste servidor usando o template '$tpl'.
+   Reconfigurá-lo apontaria um site em produção para o AzuraCast.
+   Se a intenção é mesmo essa, remova o domínio antes, de forma consciente."
+    fi
+    ok "domínio já existe e já usa o template webradio (reexecução segura)"
   else
-    warn "não identifiquei o nginx do Hestia em 80/443: '$port_owner'"
+    ok "domínio '$DOMAIN' é novo — nenhum site existente será tocado"
   fi
 
-  # 2. Portas de loopback que vamos usar precisam estar livres.
+  # ── Backend web precisa ser nginx puro ────────────────────────────────
+  # Com apache2 por trás, v-change-web-domain-tpl falharia DEPOIS de criar o
+  # domínio, deixando estado parcial.
+  if [[ ! -d /usr/local/hestia/data/templates/web/nginx/php-fpm ]]; then
+    die "template dir do nginx/php-fpm não encontrado — backend web incompatível"
+  fi
+  ok "backend web nginx/php-fpm presente"
+
+  # ── Portas 80/443 continuam do Hestia ─────────────────────────────────
+  local dono
+  dono=$(ss -lntp 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $6}' | head -1)
+  [[ "$dono" == *nginx* ]] && ok "80/443 pertencem ao nginx do Hestia" \
+                           || warn "não identifiquei o nginx do Hestia em 80/443: '$dono'"
+
   for p in 8081 8005 8010; do
     ss -lnt 2>/dev/null | grep -q ":$p " && die "porta $p já está em uso" || ok "porta $p livre"
   done
 
-  # 3. Disco. Este host já teve incidente de backup falhando por espaço;
-  #    somar 50 GB de mídia sem checar seria repetir o erro.
-  local avail_gb needed_gb
-  avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+  # ── Disco ─────────────────────────────────────────────────────────────
+  # Mede o volume onde a mídia vai realmente morar. `df /` mediria o
+  # filesystem errado se /var estiver em mount separado.
+  local alvo avail_gb needed_gb
+  alvo="$AZC_DIR"; while [[ ! -d "$alvo" && "$alvo" != "/" ]]; do alvo=$(dirname "$alvo"); done
+  avail_gb=$(df -BG --output=avail "$alvo" | tail -1 | tr -dc '0-9')
   needed_gb=$(( MEDIA_MIN_GB + DISK_HEADROOM_GB ))
-  if (( avail_gb < needed_gb )); then
-    die "disco insuficiente: ${avail_gb} GB livres, necessário ${needed_gb} GB (${MEDIA_MIN_GB} de mídia + ${DISK_HEADROOM_GB} de folga)"
-  fi
-  ok "disco: ${avail_gb} GB livres (necessário ${needed_gb} GB)"
+  (( avail_gb >= needed_gb )) \
+    || die "disco insuficiente em $(df --output=target "$alvo" | tail -1): ${avail_gb} GB livres, necessário ${needed_gb} GB"
+  ok "disco: ${avail_gb} GB livres em $(df --output=target "$alvo" | tail -1)"
 
-  # 4. DNS precisa apontar para cá antes do Let's Encrypt tentar validar.
+  # ── DNS ───────────────────────────────────────────────────────────────
   local host_ip dns_ip
   host_ip=$(hostname -I | awk '{print $1}')
   dns_ip=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)
   if [[ -z "$dns_ip" ]]; then
-    warn "DNS de $DOMAIN não resolve ainda — o Let's Encrypt vai falhar até propagar"
+    warn "DNS de $DOMAIN não resolve — o Let's Encrypt falhará até propagar"
   elif [[ "$dns_ip" != "$host_ip" ]]; then
     warn "DNS de $DOMAIN aponta para $dns_ip, mas este host é $host_ip"
   else
     ok "DNS de $DOMAIN resolve para este host ($host_ip)"
   fi
 
-  # 5. Hestia e usuário.
-  [[ -d /usr/local/hestia ]] || die "HestiaCP não encontrado"
   [[ -d "/home/$HESTIA_USER" ]] || die "usuário Hestia '$HESTIA_USER' não existe"
-  ok "HestiaCP presente, usuário $HESTIA_USER existe"
+  ok "usuário $HESTIA_USER existe"
 
-  # 6. Aviso sobre o Docker no host de produção.
+  # ── Compose precisa suportar a tag !override ──────────────────────────
   if command -v docker >/dev/null 2>&1; then
-    ok "Docker já instalado ($(docker --version))"
+    local cv
+    cv=$(docker compose version --short 2>/dev/null || echo "0")
+    ok "Docker presente; Compose $cv"
+    if ! printf '%s\n2.24.0\n' "$cv" | sort -V -C; then
+      warn "Compose $cv pode não suportar a tag !override (precisa >= 2.24)."
+      warn "Sem ela, o override SOMA portas em vez de substituir — perigoso aqui."
+    fi
   else
-    warn "Docker será INSTALADO. Ele altera regras de netfilter."
-    warn "Mitigação aplicada: todas as portas ficam em 127.0.0.1, então"
-    warn "nenhuma regra do Docker expõe serviço para fora."
+    warn "Docker será INSTALADO (altera regras de netfilter)."
+    warn "Mitigação: daemon.json com \"ip\": \"127.0.0.1\" ANTES de qualquer subida."
   fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-install_docker() {
-  step "Docker"
-  if command -v docker >/dev/null 2>&1; then ok "já instalado"; return; fi
-
-  # Configura o daemon ANTES de subir, para nunca existir uma janela em que
-  # o Docker esteja ativo com padrões que conflitem com o firewall do Hestia.
+# Camada 1 de isolamento: default de publicação no loopback.
+# Aplicada SEMPRE, inclusive com Docker pré-instalado — era o furo da versão
+# anterior, que só escrevia daemon.json quando instalava o Docker do zero.
+configurar_daemon() {
+  step "Docker daemon: publicação padrão em 127.0.0.1"
   mkdir -p /etc/docker
-  if [[ ! -f /etc/docker/daemon.json ]]; then
+  local atual=""
+  [[ -f /etc/docker/daemon.json ]] && atual=$(cat /etc/docker/daemon.json)
+
+  if grep -q '"ip"[[:space:]]*:[[:space:]]*"127.0.0.1"' <<<"$atual"; then
+    ok "daemon.json já publica em 127.0.0.1 por padrão"
+    return
+  fi
+
+  if [[ -n "$atual" ]]; then
+    cp /etc/docker/daemon.json "/etc/docker/daemon.json.bak.$(date +%s)"
+    command -v jq >/dev/null || die "daemon.json já existe e o jq não está instalado; ajuste \"ip\": \"127.0.0.1\" à mão"
+    jq '. + {ip:"127.0.0.1"}' <<<"$atual" > /etc/docker/daemon.json
+    ok "daemon.json existente preservado (backup criado) e ajustado"
+  else
     cat > /etc/docker/daemon.json <<'JSON'
 {
   "ip": "127.0.0.1",
-  "iptables": true,
   "log-driver": "json-file",
   "log-opts": { "max-size": "50m", "max-file": "3" }
 }
 JSON
-    ok "daemon.json criado: publicação padrão amarrada a 127.0.0.1"
+    ok "daemon.json criado"
   fi
+  systemctl is-active --quiet docker && { systemctl restart docker; ok "docker reiniciado"; }
+}
 
+install_docker() {
+  command -v docker >/dev/null 2>&1 && { ok "Docker já instalado"; return; }
+  step "Instalando Docker"
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
@@ -122,76 +169,110 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_C
 # ─────────────────────────────────────────────────────────────────────────
 install_azuracast() {
   step "AzuraCast"
-  mkdir -p "$AZC_DIR"
-  cd "$AZC_DIR"
+  mkdir -p "$AZC_DIR"; cd "$AZC_DIR"
 
-  if [[ ! -f docker-compose.yml ]]; then
-    curl -fsSL https://raw.githubusercontent.com/AzuraCast/AzuraCast/main/docker-compose.sample.yml \
-      -o docker-compose.yml
+  [[ -f docker-compose.yml ]] || {
+    curl -fsSL https://raw.githubusercontent.com/AzuraCast/AzuraCast/main/docker-compose.sample.yml -o docker-compose.yml
     ok "docker-compose.yml obtido"
-  fi
+  }
+  cp "$AQUI/docker-compose.override.yml" "$AZC_DIR/docker-compose.override.yml"
 
-  # O override é o que garante o isolamento em loopback.
-  cp "$(dirname "$(realpath "$0")")/docker-compose.override.yml" "$AZC_DIR/docker-compose.override.yml"
-  ok "override de isolamento aplicado"
-
-  if [[ ! -f azuracast.env ]]; then
-    cat > azuracast.env <<ENVEOF
-# Web Rádio Porto do Capim
-LANG=pt_BR.UTF-8
+  # Camada 2: `.env` do projeto. A interpolação ${AZURACAST_HTTP_PORT} lê
+  # DAQUI, nunca de env_file:. Sem este arquivo, cai no default 80/443.
+  cat > "$AZC_DIR/.env" <<ENVEOF
 AZURACAST_HTTP_PORT=8081
 AZURACAST_HTTPS_PORT=0
-# Atrás do proxy do Hestia: o AzuraCast precisa saber a URL pública real
-# para montar corretamente os links do painel e as URLs dos manifestos HLS.
+AZURACAST_SFTP_PORT=2022
+ENVEOF
+  cat > "$AZC_DIR/azuracast.env" <<ENVEOF
+LANG=pt_BR.UTF-8
 AZURACAST_BASE_URL=https://${DOMAIN}
 ENABLE_ADVANCED_FEATURES=true
-# TLS é terminado pelo nginx do Hestia; o contêiner não gerencia certificado.
-LETSENCRYPT_HOST=
 ENVEOF
-    ok "azuracast.env criado (base URL https://${DOMAIN})"
+  ok ".env e azuracast.env gravados"
+
+  # ── Portão: conferir a configuração RESOLVIDA antes de subir ──────────
+  # É aqui que se pega o override não fazendo efeito. Melhor abortar do que
+  # descobrir com o vhost das câmaras fora do ar.
+  step "Conferindo a configuração resolvida"
+  local publicadas
+  publicadas=$(docker compose config --format json 2>/dev/null \
+    | jq -r '.services.web.ports[]? | "\(.published)|\(.host_ip // "0.0.0.0")"' 2>/dev/null || echo "")
+  [[ -n "$publicadas" ]] || die "não foi possível resolver a configuração do compose (jq instalado?)"
+
+  local fora
+  fora=$(awk -F'|' '$2 != "127.0.0.1"' <<<"$publicadas" || true)
+  if [[ -n "$fora" ]]; then
+    echo "$fora" | head -10
+    die "o override NÃO surtiu efeito: as portas acima publicariam fora do loopback.
+   Causa provável: Compose < 2.24 (sem suporte a !override). NÃO suba assim."
   fi
+  ok "todas as $(wc -l <<<"$publicadas") portas resolvidas para 127.0.0.1"
 
   docker compose pull -q
   docker compose up -d
   ok "contêineres no ar"
 
-  # Confirma que NADA vazou para fora do loopback.
+  verificar_isolamento
+}
+
+# Camada 3: verificação pós-subida, olhando as DUAS camadas onde a exposição
+# pode acontecer. `ss -lnt` sozinho é cego: com userland-proxy desligado não
+# existe socket em escuta, e a exposição vive só no DNAT do netfilter.
+verificar_isolamento() {
   step "Verificação de isolamento"
-  local leaked
-  leaked=$(ss -lnt 2>/dev/null | awk '$4 ~ /^(0\.0\.0\.0|\[::\]|\*):(8081|800[0-9]|801[0-9]|802[0-5])$/ {print $4}')
-  if [[ -n "$leaked" ]]; then
-    die "VAZAMENTO: portas expostas fora do loopback: $leaked — rode 'docker compose down' agora"
+
+  local vaz
+  vaz=$(docker ps --format '{{.Names}} {{.Ports}}' | grep -vE '(^\S+\s*$)' \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+|\[::\]:[0-9]+' \
+        | grep -v '^127\.0\.0\.1:' || true)
+  if [[ -n "$vaz" ]]; then
+    echo "$vaz" | sort -u | head -20
+    docker compose down
+    die "VAZAMENTO: portas publicadas fora do loopback (listadas acima). Stack derrubada."
   fi
-  ok "nenhuma porta do AzuraCast exposta fora de 127.0.0.1"
+  ok "docker ps: nenhuma porta fora de 127.0.0.1"
+
+  if iptables -t nat -S DOCKER 2>/dev/null | grep -qE '\-\-dport (80|443) '; then
+    docker compose down
+    die "VAZAMENTO: há DNAT do Docker para as portas 80/443. Stack derrubada."
+  fi
+  ok "netfilter: nenhum DNAT do Docker para 80/443"
+
+  local hestia_ok
+  hestia_ok=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://127.0.0.1:80/ 2>/dev/null || echo "erro")
+  ok "nginx do Hestia responde na 80 (HTTP $hestia_ok)"
 }
 
 # ─────────────────────────────────────────────────────────────────────────
 setup_site() {
-  step "Site novo no HestiaCP: $DOMAIN"
-  local V=/usr/local/hestia/bin
+  step "Site no HestiaCP: $DOMAIN"
+  local TPL_DIR=/usr/local/hestia/data/templates/web/nginx/php-fpm
 
-  if $V/v-list-web-domain "$HESTIA_USER" "$DOMAIN" >/dev/null 2>&1; then
-    ok "domínio já existe no Hestia"
-  else
-    $V/v-add-web-domain "$HESTIA_USER" "$DOMAIN"
-    ok "domínio criado"
-  fi
+  # Templates gravados como arquivos separados. Gerar um do outro por sed foi
+  # o que quebrou o Let's Encrypt na versão anterior.
+  cp "$AQUI/webradio.tpl"  "$TPL_DIR/webradio.tpl"
+  cp "$AQUI/webradio.stpl" "$TPL_DIR/webradio.stpl"
+  ok "templates webradio instalados"
 
-  # Template proxy do Hestia costuma apontar o nginx para ele mesmo e gerar
-  # "400 header too large". Removemos o proxy e usamos só nosso template.
+  $V/v-list-web-domain "$HESTIA_USER" "$DOMAIN" >/dev/null 2>&1 \
+    || { $V/v-add-web-domain "$HESTIA_USER" "$DOMAIN"; ok "domínio criado"; }
+
   $V/v-delete-web-domain-proxy "$HESTIA_USER" "$DOMAIN" 2>/dev/null || true
 
-  local TPL_DIR=/usr/local/hestia/data/templates/web/nginx/php-fpm
-  cp "$(dirname "$(realpath "$0")")/nginx-proxy.conf" "$TPL_DIR/webradio.stpl"
-  sed 's/%web_ssl_port%/%web_port%/; s/ ssl;/;/; /ssl_certificate/d; /ssl_protocols/d' \
-    "$TPL_DIR/webradio.stpl" > "$TPL_DIR/webradio.tpl"
-  ok "template nginx 'webradio' instalado"
+  # ORDEM IMPORTA: o certificado é emitido com o vhost HTTP servindo o desafio
+  # ACME. Só depois trocamos para o template webradio (que já traz o bloco
+  # ACME no .tpl, permitindo renovação futura).
+  $V/v-add-letsencrypt-domain "$HESTIA_USER" "$DOMAIN" \
+    || die "Let's Encrypt falhou. Verifique o DNS e o log em /var/log/hestia/.
+   NÃO seguimos sem certificado: sem TLS o app iOS (ATS) e o player web não funcionam."
+  ok "certificado emitido"
 
   $V/v-change-web-domain-tpl "$HESTIA_USER" "$DOMAIN" webradio
-  $V/v-add-letsencrypt-domain "$HESTIA_USER" "$DOMAIN" || \
-    warn "Let's Encrypt falhou — verifique o DNS e rode: v-add-letsencrypt-domain $HESTIA_USER $DOMAIN"
   $V/v-rebuild-web-domain "$HESTIA_USER" "$DOMAIN"
   ok "site publicado em https://$DOMAIN"
+
+  nginx -t 2>&1 | tail -2
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -199,18 +280,24 @@ case "$MODE" in
   --check)
     preflight
     echo; echo "${GRN}${BLD}Pré-voo concluído. Nada foi alterado.${RST}"
-    echo "Para aplicar de fato:  DOMAIN=$DOMAIN HESTIA_USER=$HESTIA_USER $0 --apply"
+    echo "Para aplicar:  DOMAIN=$DOMAIN HESTIA_USER=$HESTIA_USER $0 --apply"
     ;;
   --apply)
     preflight
     echo
-    read -r -p "${BLD}Aplicar as mudanças neste servidor de PRODUÇÃO? (digite CONFIRMO): ${RST}" a
+    echo "${BLD}Servidor:${RST} $(hostname) ($(hostname -I | awk '{print $1}'))"
+    echo "${BLD}Domínio a configurar:${RST} $DOMAIN  (usuário $HESTIA_USER)"
+    echo "${BLD}Sites em produção neste host:${RST} $(ls /home/*/web 2>/dev/null | grep -c '\.' || echo '?')"
+    echo
+    read -r -p "${BLD}Confirma aplicar em PRODUÇÃO? (digite CONFIRMO): ${RST}" a
     [[ "$a" == "CONFIRMO" ]] || die "abortado pelo operador"
+    configurar_daemon
     install_docker
+    configurar_daemon   # reaplica caso o Docker tenha sido instalado agora
     install_azuracast
     setup_site
     echo; echo "${GRN}${BLD}Pronto.${RST} Painel: https://$DOMAIN"
-    echo "Rollback: cd $AZC_DIR && docker compose down && v-delete-web-domain $HESTIA_USER $DOMAIN"
+    echo "Rollback: cd $AZC_DIR && docker compose down && $V/v-delete-web-domain $HESTIA_USER $DOMAIN"
     ;;
   *) die "uso: $0 [--check|--apply]" ;;
 esac

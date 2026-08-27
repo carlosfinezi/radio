@@ -18,12 +18,25 @@ import { writeFileSync } from 'node:fs';
 import { requirements, meta } from './requirements.mjs';
 
 const execAsync = promisify(exec);
+
+/**
+ * Executa comando e devolve { out, ok }.
+ *
+ * O `ok` NÃO é decoração. A versão anterior devolvia só a string e engolia
+ * o erro, o que produzia o pior defeito possível numa suíte de conformidade:
+ * `docker exec` falhando devolvia string vazia, a regex não achava limite
+ * nenhum, e o check concluía "sem limite de ouvintes" -> PASS. Ou seja,
+ * o servidor inteiro fora do ar era certificado como conforme.
+ *
+ * Todo check que dependa de comando externo TEM de olhar o `ok` antes de
+ * interpretar o `out`.
+ */
 const sh = async (cmd) => {
   try {
     const { stdout } = await execAsync(cmd, { timeout: 60000, shell: '/bin/bash' });
-    return stdout;
+    return { out: stdout, ok: true, code: 0 };
   } catch (e) {
-    return e.stdout || '';
+    return { out: e.stdout || '', ok: false, code: e.code ?? 1, err: (e.stderr || e.message || '').slice(0, 200) };
   }
 };
 
@@ -74,9 +87,17 @@ async function runOnce() {
       }
       r.ms = Date.now() - t0;
 
-      const status = r.manual ? 'MANUAL' : r.pass ? 'PASS' : 'FAIL';
-      const color = r.manual ? C.yellow : r.pass ? C.green : C.red;
-      const icon = r.manual ? '⚠' : r.pass ? '✓' : '✗';
+      // `manual` NÃO pode absolver um FAIL crítico.
+      // Na versão anterior, `manual: true` tirava o check do denominador
+      // mesmo com pass:false e critical:true — a suíte imprimia
+      // "✓ Todos os checks automatizáveis passaram" e saía com código 0
+      // com o app fora das lojas, o backup nunca restaurado e o SLA nunca
+      // medido. Era exatamente a linha que iria colada numa proposta.
+      // Agora MANUAL significa "pendente de evidência humana", e pendência
+      // em item crítico bloqueia a aprovação.
+      const status = r.pass ? (r.manual ? 'PARCIAL' : 'PASS') : (r.manual ? 'MANUAL' : 'FAIL');
+      const color = status === 'PASS' ? C.green : status === 'FAIL' ? C.red : C.yellow;
+      const icon = status === 'PASS' ? '✓' : status === 'FAIL' ? '✗' : '⚠';
       process.stdout.write(`\r  ${color}${icon}${C.reset} ${check.name} ${C.dim}(${r.ms}ms)${C.reset}\n`);
       console.log(`    ${C.dim}${r.evidence}${C.reset}`);
 
@@ -95,10 +116,15 @@ async function runOnce() {
     pass: flat.filter((c) => c.status === 'PASS').length,
     fail: flat.filter((c) => c.status === 'FAIL').length,
     manual: flat.filter((c) => c.status === 'MANUAL').length,
+    parcial: flat.filter((c) => c.status === 'PARCIAL').length,
     criticalFail: flat.filter((c) => c.status === 'FAIL' && c.critical).length,
+    // Pendência de evidência humana em item crítico bloqueia a aprovação
+    // tanto quanto uma falha: não se assina contrato com "depois a gente vê".
+    criticalPendente: flat.filter((c) => c.status === 'MANUAL' && c.critical).length,
     startedAt: started.toISOString(),
     durationMs: Date.now() - started.getTime(),
   };
+  summary.bloqueia = summary.criticalFail + summary.criticalPendente;
 
   return { summary, results, cfg: { ...cfg, apiKey: cfg.apiKey ? '***' : '(vazio)' } };
 }
@@ -109,18 +135,25 @@ function printSummary(s) {
     `${C.bold}RESUMO${C.reset}  ` +
     `${C.green}${s.pass} PASS${C.reset}  ` +
     `${C.red}${s.fail} FAIL${C.reset}  ` +
-    `${C.yellow}${s.manual} MANUAL${C.reset}  ` +
+    `${C.yellow}${s.manual} PENDENTE${C.reset}  ` +
+    `${C.yellow}${s.parcial} PARCIAL${C.reset}  ` +
     `${C.dim}de ${s.total} verificações em ${(s.durationMs / 1000).toFixed(1)}s${C.reset}`
   );
+
   if (s.criticalFail > 0) {
     console.log(`${C.red}${C.bold}✗ ${s.criticalFail} falha(s) CRÍTICA(S) — não conforme ao edital.${C.reset}`);
-  } else if (s.fail > 0) {
-    console.log(`${C.yellow}Falhas apenas em itens não-críticos.${C.reset}`);
-  } else {
-    console.log(`${C.green}${C.bold}✓ Todos os checks automatizáveis passaram.${C.reset}`);
   }
-  if (s.manual > 0) {
-    console.log(`${C.yellow}${s.manual} item(ns) exigem evidência manual — ver laudo.${C.reset}`);
+  if (s.criticalPendente > 0) {
+    console.log(
+      `${C.yellow}${C.bold}⚠ ${s.criticalPendente} item(ns) CRÍTICO(S) sem evidência${C.reset}` +
+      `${C.yellow} — conformidade NÃO comprovada (não é o mesmo que aprovado).${C.reset}`
+    );
+  }
+  if (s.bloqueia === 0 && s.fail > 0) {
+    console.log(`${C.yellow}Falhas apenas em itens não-críticos.${C.reset}`);
+  }
+  if (s.bloqueia === 0 && s.fail === 0) {
+    console.log(`${C.green}${C.bold}✓ Conformidade comprovada em todos os itens críticos.${C.reset}`);
   }
 }
 
@@ -131,25 +164,37 @@ function toMarkdown(report) {
   L.push(`Gerado em: ${report.summary.startedAt}`);
   L.push(`Alvo: \`${report.cfg.baseUrl}\` · estação \`${report.cfg.station}\``);
   L.push('');
-  L.push(`**${report.summary.pass} aprovados · ${report.summary.fail} reprovados · ${report.summary.manual} manuais** (${report.summary.total} verificações)`);
+  const s = report.summary;
+  L.push(`**${s.pass} aprovados · ${s.fail} reprovados · ${s.manual} pendentes de evidência · ${s.parcial} parciais** (${s.total} verificações)`);
+  L.push('');
+  if (s.bloqueia > 0) {
+    L.push(`> ⛔ **Conformidade NÃO comprovada.** ${s.criticalFail} falha(s) crítica(s) e ` +
+      `${s.criticalPendente} item(ns) crítico(s) sem evidência. Este laudo não sustenta assinatura de contrato.`);
+  } else {
+    L.push('> ✅ Conformidade comprovada em todos os itens críticos automatizáveis.');
+  }
   L.push('');
   L.push('| Alínea | Requisito | Resultado |');
   L.push('|---|---|---|');
   for (const r of report.results) {
     const f = r.checks.filter((c) => c.status === 'FAIL').length;
     const m = r.checks.filter((c) => c.status === 'MANUAL').length;
-    const st = f > 0 ? `❌ ${f} falha(s)` : m > 0 ? `⚠️ ${m} manual` : '✅ conforme';
+    const p = r.checks.filter((c) => c.status === 'PARCIAL').length;
+    const st = f > 0 ? `❌ ${f} falha(s)`
+      : m > 0 ? `⚠️ ${m} sem evidência`
+      : p > 0 ? `🟡 ${p} parcial(is)`
+      : '✅ conforme';
     L.push(`| ${r.letter} | ${r.title} | ${st} |`);
   }
   L.push('');
+  const ICON = { PASS: '✅', FAIL: '❌', MANUAL: '⚠️', PARCIAL: '🟡' };
   for (const r of report.results) {
     L.push(`## (${r.letter}) ${r.title}`);
     L.push('');
     L.push(`> ${r.edital}`);
     L.push('');
     for (const c of r.checks) {
-      const icon = c.status === 'PASS' ? '✅' : c.status === 'MANUAL' ? '⚠️' : '❌';
-      L.push(`- ${icon} **${c.name}**`);
+      L.push(`- ${ICON[c.status]} **${c.name}**${c.critical ? '' : ' _(não-crítico)_'}`);
       L.push(`  - Evidência: ${c.evidence}`);
     }
     L.push('');
@@ -158,8 +203,12 @@ function toMarkdown(report) {
 }
 
 // ── main ────────────────────────────────────────────────────────────────
-const maxAttempts = Number(val('--max-attempts', has('--loop') ? 10 : 1));
-const waitSec = Number(val('--wait', 30));
+// `Number(undefined)` é NaN, e `for (i=1; i<=NaN)` nunca executa: o laço não
+// rodava, `report` ficava undefined e o processo estourava com TypeError ao
+// imprimir o resumo. Qualquer valor inválido cai no default.
+const num = (flag, def) => { const n = Number(val(flag, def)); return Number.isFinite(n) && n > 0 ? n : def; };
+const maxAttempts = num('--max-attempts', has('--loop') ? 10 : 1);
+const waitSec = num('--wait', 30);
 let report;
 
 for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -169,6 +218,7 @@ for (let attempt = 1; attempt <= maxAttempts; attempt++) {
   report = await runOnce();
   printSummary(report.summary);
 
+  // Repetir não resolve pendência de evidência humana; só falha transitória.
   if (report.summary.criticalFail === 0) break;
   if (attempt < maxAttempts) {
     console.log(`${C.dim}Aguardando ${waitSec}s antes de repetir...${C.reset}`);
@@ -181,4 +231,5 @@ if (jsonPath) { writeFileSync(jsonPath, JSON.stringify(report, null, 2)); consol
 const mdPath = val('--md');
 if (mdPath) { writeFileSync(mdPath, toMarkdown(report)); console.log(`Laudo Markdown: ${mdPath}`); }
 
-process.exit(report.summary.criticalFail > 0 ? 1 : 0);
+// Sai diferente de zero tanto por falha crítica quanto por pendência crítica.
+process.exit(report.summary.bloqueia > 0 ? 1 : 0);

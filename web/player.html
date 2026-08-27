@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Rádio Porto do Capim</title>
+<!--
+  Player web — alínea (c) do edital.
+
+  Requisitos de projeto:
+  1. Autocontido: um arquivo, sem build, sem framework. Precisa poder ser
+     colado num CMS institucional que ninguém vai querer recompilar.
+  2. HLS com fallback para MP3. O Safari toca HLS nativamente; Chrome e
+     Firefox precisam do hls.js. Se nada disso funcionar (proxy corporativo
+     bloqueando .m3u8), cai para o stream ICY/MP3.
+  3. Sem cookies, sem rastreamento de terceiros. É site de universidade
+     pública: LGPD e nada de script externo além da biblioteca de vídeo.
+-->
+<style>
+  :root {
+    --bg: #0f1720; --card: #16212c; --fg: #e8eef4;
+    --muted: #93a4b3; --accent: #12897a; --live: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: grid; place-items: center; min-height: 100vh; padding: 20px;
+  }
+  .card {
+    background: var(--card); border-radius: 18px; padding: 32px;
+    width: min(420px, 100%); text-align: center;
+    box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  }
+  .art {
+    width: 180px; height: 180px; margin: 0 auto 22px; border-radius: 14px;
+    background: #1e2b38 center/cover no-repeat;
+    display: grid; place-items: center; font-size: 56px; color: var(--muted);
+  }
+  h1 { font-size: 1.05rem; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: .875rem; margin: 0 0 20px; }
+  #titulo { font-size: 1.15rem; font-weight: 600; margin: 0 0 4px;
+            overflow-wrap: anywhere; }
+  #artista { color: var(--muted); font-size: .9rem; margin: 0 0 24px; }
+  button.play {
+    width: 68px; height: 68px; border-radius: 50%; border: 0; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: 26px; line-height: 1;
+    display: grid; place-items: center; margin: 0 auto;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  button.play:hover { filter: brightness(1.12); }
+  button.play:active { transform: scale(.94); }
+  button.play:disabled { opacity: .5; cursor: progress; }
+  .status {
+    margin-top: 14px; font-size: .8rem; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #45525f; }
+  .dot.on { background: var(--live); box-shadow: 0 0 0 0 rgba(229,72,77,.7);
+            animation: pulse 1.8s infinite; }
+  @keyframes pulse {
+    70%  { box-shadow: 0 0 0 9px rgba(229,72,77,0); }
+    100% { box-shadow: 0 0 0 0 rgba(229,72,77,0); }
+  }
+  .vol { margin-top: 22px; display: flex; align-items: center; gap: 10px; }
+  .vol input { flex: 1; accent-color: var(--accent); }
+  .erro { color: #ffb4b4; font-size: .85rem; margin-top: 14px; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Web Rádio Porto do Capim</h1>
+  <p class="sub">Universidade Federal da Paraíba</p>
+
+  <div class="art" id="art">♪</div>
+  <p id="titulo">Web Rádio Porto do Capim</p>
+  <p id="artista">Transmissão ao vivo</p>
+
+  <button class="play" id="btn" aria-label="Tocar">▶</button>
+
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="estado">Fora do ar</span>
+  </div>
+
+  <div class="vol">
+    <span aria-hidden="true">🔈</span>
+    <input type="range" id="vol" min="0" max="100" value="80"
+           aria-label="Volume">
+  </div>
+
+  <p class="erro" id="erro" role="alert"></p>
+</div>
+
+<audio id="audio" preload="none"></audio>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var HOST     = location.host || 'radio.liciteagora.app';
+  var ESTACAO  = 'porto_do_capim';
+  var HLS_URL  = 'https://' + HOST + '/hls/' + ESTACAO + '/live.m3u8';
+  var MP3_URL  = 'https://' + HOST + '/listen/' + ESTACAO + '/radio.mp3';
+  var NP_URL   = 'https://' + HOST + '/api/nowplaying/' + ESTACAO;
+
+  var audio = document.getElementById('audio');
+  var btn   = document.getElementById('btn');
+  var dot   = document.getElementById('dot');
+  var estado= document.getElementById('estado');
+  var erro  = document.getElementById('erro');
+  var hls   = null;
+
+  function setEstado(txt, aoVivo) {
+    estado.textContent = txt;
+    dot.classList.toggle('on', !!aoVivo);
+  }
+
+  // ── Carga da fonte, com degradação em cascata ───────────────────────
+  function carregar() {
+    erro.textContent = '';
+
+    // Safari e iOS tocam HLS direto no elemento <audio>.
+    if (audio.canPlayType('application/vnd.apple.mpegurl')) {
+      audio.src = HLS_URL;
+      return;
+    }
+
+    if (window.Hls && window.Hls.isSupported()) {
+      hls = new window.Hls({
+        // Rádio ao vivo: perseguir a borda da transmissão. Sem isto o
+        // ouvinte fica minutos atrasado depois de uma oscilação de rede.
+        liveSyncDurationCount: 3,
+        enableWorker: true,
+      });
+      hls.loadSource(HLS_URL);
+      hls.attachMedia(audio);
+      hls.on(window.Hls.Events.ERROR, function (_e, data) {
+        if (!data.fatal) return;
+        // Erro fatal de HLS não é o fim: o MP3 costuma passar onde o
+        // .m3u8 é bloqueado por inspeção de conteúdo em rede corporativa.
+        destruirHls();
+        audio.src = MP3_URL;
+        audio.play().catch(mostrarErro);
+      });
+      return;
+    }
+
+    audio.src = MP3_URL; // navegador antigo, sem MSE
+  }
+
+  function destruirHls() {
+    if (hls) { hls.destroy(); hls = null; }
+  }
+
+  function mostrarErro(e) {
+    erro.textContent = 'Não foi possível iniciar a reprodução. ' +
+                       'Verifique sua conexão e tente novamente.';
+    setEstado('Fora do ar', false);
+    btn.textContent = '▶';
+    btn.disabled = false;
+    if (e) { try { console.error(e); } catch (_) {} }
+  }
+
+  // ── Controle ────────────────────────────────────────────────────────
+  btn.addEventListener('click', function () {
+    if (audio.paused) {
+      btn.disabled = true;
+      setEstado('Conectando…', false);
+      if (!audio.src && !hls) carregar();
+      audio.play().then(function () {
+        btn.disabled = false;
+      }).catch(function (e) {
+        btn.disabled = false;
+        mostrarErro(e);
+      });
+    } else {
+      audio.pause();
+      // Numa transmissão ao vivo, "pausar" acumularia atraso indefinido.
+      // Descartamos a fonte para que o play seguinte volte ao vivo de agora.
+      destruirHls();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+  });
+
+  audio.addEventListener('playing', function () {
+    btn.textContent = '⏸'; btn.disabled = false; setEstado('Ao vivo', true);
+  });
+  audio.addEventListener('pause', function () {
+    btn.textContent = '▶'; setEstado('Fora do ar', false);
+  });
+  audio.addEventListener('waiting', function () {
+    setEstado('Armazenando…', true);
+  });
+  audio.addEventListener('error', function () {
+    if (audio.src) mostrarErro();
+  });
+
+  var vol = document.getElementById('vol');
+  audio.volume = vol.value / 100;
+  vol.addEventListener('input', function () { audio.volume = vol.value / 100; });
+
+  // ── Metadados "tocando agora" ───────────────────────────────────────
+  function atualizarMetadados() {
+    fetch(NP_URL, { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var s = d && d.now_playing && d.now_playing.song;
+        if (!s) return;
+        document.getElementById('titulo').textContent =
+          s.title || 'Web Rádio Porto do Capim';
+        document.getElementById('artista').textContent =
+          s.artist || 'Transmissão ao vivo';
+        var art = document.getElementById('art');
+        if (s.art) { art.style.backgroundImage = 'url("' + s.art + '")'; art.textContent = ''; }
+      })
+      .catch(function () {
+        // Metadado é enfeite. Falhar aqui NUNCA pode afetar o áudio.
+      });
+  }
+  atualizarMetadados();
+  setInterval(atualizarMetadados, 15000);
+})();
+</script>
+</body>
+</html>

@@ -60,8 +60,12 @@ export async function measureIcyBitrate(url, seconds = 12) {
     seconds = 10;
   }
 
+  // NÃO pedir `Icy-MetaData: 1` aqui. Com metadados ligados o servidor
+  // interpola blocos de título no fluxo de áudio, e esses bytes entram na
+  // contagem — viés sistemático para cima justamente no número que vai
+  // para o laudo. Os cabeçalhos `icy-*` de resposta (inclusive `icy-br`)
+  // vêm de qualquer forma.
   const { status, headers, req, res } = await openStream(url, {
-    headers: { 'Icy-MetaData': '1' },
     timeoutMs: (WARMUP_MS + seconds * 1000) * 2,
   });
 
@@ -73,25 +77,46 @@ export async function measureIcyBitrate(url, seconds = 12) {
   return await new Promise((resolve, reject) => {
     let bytes = 0;
     let measuringFrom = null;
+    let warmupTimer = null;
+    let janelaTimer = null;
+    let finalizado = false;
+
+    const encerrar = (fn, arg) => {
+      if (finalizado) return;
+      finalizado = true;
+      clearTimeout(warmupTimer);
+      clearTimeout(janelaTimer);   // sem isso o processo ficava preso até 15s
+      req.destroy();               // extras por medição quando havia erro
+      fn(arg);
+    };
 
     res.on('data', (chunk) => {
       if (measuringFrom === null) return; // ainda no burst
       bytes += chunk.length;
     });
-    res.on('error', reject);
-    req.on('error', reject);
+
+    // "Contínuo e ininterrupto" (alínea a) significa que o mount NÃO fecha.
+    // Sem este handler, um stream que morria no meio da janela era medido
+    // como se tivesse durado a janela inteira: bytes parados, tempo correndo.
+    // O bitrate saía baixo, mas checks do tipo "recebeu algum byte?" davam
+    // PASS para uma rádio que caiu 6 segundos depois de abrir.
+    res.on('end', () => encerrar(reject, new Error(
+      `o servidor ENCERROU o stream após ${((Date.now() - (measuringFrom ?? Date.now())) / 1000).toFixed(1)}s ` +
+      'de medição — transmissão não é contínua'
+    )));
+    res.on('aborted', () => encerrar(reject, new Error('conexão abortada pelo servidor')));
+    res.on('error', (e) => encerrar(reject, e));
+    req.on('error', (e) => encerrar(reject, e));
 
     // Só começa a contar depois do burst ter passado.
-    const warmupTimer = setTimeout(() => { measuringFrom = Date.now(); }, WARMUP_MS);
+    warmupTimer = setTimeout(() => { measuringFrom = Date.now(); }, WARMUP_MS);
 
-    setTimeout(() => {
-      clearTimeout(warmupTimer);
+    janelaTimer = setTimeout(() => {
       const elapsedMs = measuringFrom ? Date.now() - measuringFrom : 0;
-      req.destroy();
       if (!elapsedMs || bytes === 0) {
-        return reject(new Error('stream não entregou dados após o warmup'));
+        return encerrar(reject, new Error('stream não entregou dados após o warmup'));
       }
-      resolve({
+      encerrar(resolve, {
         kbps: (bytes * 8) / elapsedMs, // bytes*8/ms === kbits/s
         bytes,
         elapsedMs,
@@ -123,16 +148,33 @@ export function parseM3U8(text, baseUrl) {
   const segments = [];
   let targetDuration = null;
   let pendingVariant = null;
+  let pendingByteRange = null;
+  let initSegment = null;
+  let ultimoFimByteRange = 0;
 
   for (const line of lines) {
     if (line.startsWith('#EXT-X-TARGETDURATION:')) {
       targetDuration = Number(line.split(':')[1]);
     } else if (line.startsWith('#EXT-X-STREAM-INF:')) {
       const attrs = line.slice(line.indexOf(':') + 1);
-      const bw = /BANDWIDTH=(\d+)/.exec(attrs);
+      // `(?:^|,)` é obrigatório: /BANDWIDTH=(\d+)/ casa DENTRO de
+      // `AVERAGE-BANDWIDTH=`, então um manifesto com
+      // "AVERAGE-BANDWIDTH=120000,BANDWIDTH=128000" capturava 120000 —
+      // e na escolha de variante podia selecionar a faixa errada.
+      const bw = /(?:^|,)BANDWIDTH=(\d+)/.exec(attrs);
       pendingVariant = { bandwidth: bw ? Number(bw[1]) : null, raw: attrs };
+    } else if (line.startsWith('#EXT-X-MAP:')) {
+      const m = /URI="([^"]+)"/.exec(line);
+      if (m) initSegment = new URL(m[1], baseUrl).toString();
+    } else if (line.startsWith('#EXT-X-BYTERANGE:')) {
+      // Formato: <tamanho>[@<offset>]. Sem offset, começa onde o anterior
+      // terminou (RFC 8216 §4.3.2.2).
+      const [tam, off] = line.split(':')[1].split('@').map(Number);
+      const offset = Number.isFinite(off) ? off : ultimoFimByteRange;
+      pendingByteRange = { length: tam, offset };
+      ultimoFimByteRange = offset + tam;
     } else if (line.startsWith('#EXTINF:')) {
-      segments.push({ duration: parseFloat(line.split(':')[1]), uri: null });
+      segments.push({ duration: parseFloat(line.split(':')[1]), uri: null, byteRange: null });
     } else if (!line.startsWith('#')) {
       const abs = new URL(line, baseUrl).toString();
       if (pendingVariant) {
@@ -140,27 +182,46 @@ export function parseM3U8(text, baseUrl) {
         pendingVariant = null;
       } else {
         const last = segments[segments.length - 1];
-        if (last && last.uri === null) last.uri = abs;
-        else segments.push({ duration: null, uri: abs });
+        if (last && last.uri === null) {
+          last.uri = abs;
+          last.byteRange = pendingByteRange;
+        } else {
+          segments.push({ duration: null, uri: abs, byteRange: pendingByteRange });
+        }
+        pendingByteRange = null;
       }
     }
   }
-  return { isMaster: variants.length > 0, variants, segments, targetDuration };
+  return { isMaster: variants.length > 0, variants, segments, targetDuration, initSegment };
 }
 
 /**
  * Mede a taxa real de um stream HLS baixando segmentos consecutivos.
  * Segue o master até a variante de maior BANDWIDTH.
  */
-export async function measureHlsBitrate(url, seconds = 12) {
+/**
+ * @param {'min'|'max'} variante  Qual faixa do master medir.
+ *   O edital exige velocidade MÍNIMA de 128 kbps. Medir a variante de maior
+ *   bandwidth num master com 64k e 128k aprovaria um sistema em que o ouvinte
+ *   em rede ruim recebe 64k. Por isso o padrão é 'min': validamos o pior caso
+ *   que o ouvinte pode receber, que é o que o contrato garante.
+ */
+export async function measureHlsBitrate(url, seconds = 12, variante = 'min') {
   let manifestUrl = url;
   let m = parseM3U8((await fetchText(manifestUrl)).body, manifestUrl);
 
   let declaredBandwidth = null;
+  let variantesDisponiveis = null;
   if (m.isMaster) {
-    const best = m.variants.reduce((a, b) => ((b.bandwidth ?? 0) > (a.bandwidth ?? 0) ? b : a));
-    declaredBandwidth = best.bandwidth;
-    manifestUrl = best.uri;
+    const comBw = m.variants.filter((v) => v.bandwidth != null);
+    const lista = comBw.length ? comBw : m.variants;
+    const escolhida = lista.reduce((a, b) => {
+      const ba = a.bandwidth ?? Infinity, bb = b.bandwidth ?? Infinity;
+      return variante === 'min' ? (bb < ba ? b : a) : (bb > ba ? b : a);
+    });
+    declaredBandwidth = escolhida.bandwidth;
+    variantesDisponiveis = lista.map((v) => v.bandwidth);
+    manifestUrl = escolhida.uri;
     m = parseM3U8((await fetchText(manifestUrl)).body, manifestUrl);
   }
 
@@ -169,14 +230,35 @@ export async function measureHlsBitrate(url, seconds = 12) {
 
   let totalBytes = 0;
   let totalDuration = 0;
+  let lidos = 0;
   const deadline = Date.now() + seconds * 1000;
 
   for (const seg of segs) {
     if (Date.now() > deadline) break;
-    const r = await fetch(seg.uri, { signal: AbortSignal.timeout(20000) });
-    if (!r.ok) throw new Error(`segmento HTTP ${r.status}: ${seg.uri}`);
-    totalBytes += (await r.arrayBuffer()).byteLength;
+
+    // SEGMENTOS BYTE-RANGE (RFC 8216 §4.3.2.2) compartilham a mesma URI.
+    // Baixar a URI inteira uma vez por segmento contava o arquivo N vezes:
+    // um stream real de 61 kbps era medido como 182 kbps e aprovado na
+    // alínea (b). Com Range, contamos exatamente os bytes do segmento.
+    const opts = { signal: AbortSignal.timeout(20000) };
+    if (seg.byteRange) {
+      const ini = seg.byteRange.offset;
+      const fim = ini + seg.byteRange.length - 1;
+      opts.headers = { Range: `bytes=${ini}-${fim}` };
+    }
+
+    const r = await fetch(seg.uri, opts);
+    if (!r.ok && r.status !== 206) throw new Error(`segmento HTTP ${r.status}: ${seg.uri}`);
+    const recebidos = (await r.arrayBuffer()).byteLength;
+
+    // Servidor que ignora Range devolve 200 com o arquivo inteiro; nesse caso
+    // usamos o tamanho declarado no manifesto, não o que veio no corpo.
+    totalBytes += seg.byteRange && r.status !== 206
+      ? Math.min(seg.byteRange.length, recebidos)
+      : recebidos;
+
     totalDuration += seg.duration || m.targetDuration || 0;
+    lidos++;
   }
 
   if (!totalDuration) throw new Error('não foi possível apurar a duração dos segmentos');
@@ -184,8 +266,12 @@ export async function measureHlsBitrate(url, seconds = 12) {
     kbps: (totalBytes * 8) / (totalDuration * 1000),
     bytes: totalBytes,
     durationSec: totalDuration,
-    segmentsRead: segs.length,
+    segmentsRead: lidos,          // efetivamente baixados, não os do manifesto
+    segmentsNoManifesto: segs.length,
+    usouByteRange: segs.some((s) => s.byteRange),
     targetDuration: m.targetDuration,
+    variantesDisponiveis,
+    varianteMedida: variante,
     declaredBandwidthKbps: declaredBandwidth ? declaredBandwidth / 1000 : null,
   };
 }
@@ -196,16 +282,48 @@ export async function measureHlsBitrate(url, seconds = 12) {
  *
  * Retorna a contagem de conexões que receberam pelo menos `minBytes`.
  */
-export async function concurrentListeners(url, n, { holdSeconds = 10, minBytes = 8192 } = {}) {
+export async function concurrentListeners(url, n, {
+  holdSeconds = 10,
+  expectedKbps = 128,
+  // Fração do áudio esperado que a conexão precisa ter recebido para contar
+  // como ouvinte de verdade.
+  minFracao = 0.5,
+} = {}) {
+  const esperadoBytes = (expectedKbps * 1000 * holdSeconds) / 8;
+  const minBytes = Math.max(8192, esperadoBytes * minFracao);
+
   const results = await Promise.allSettled(
     Array.from({ length: n }, async (_, i) => {
-      const { status, req, res } = await openStream(url, { timeoutMs: 30000 });
+      const { status, req, res } = await openStream(url, { timeoutMs: (holdSeconds + 20) * 1000 });
       if (status !== 200) { req.destroy(); throw new Error(`conexão ${i}: HTTP ${status}`); }
+
       let bytes = 0;
+      let encerrouCedo = null;
       res.on('data', (c) => { bytes += c.length; });
-      await new Promise((r) => setTimeout(r, holdSeconds * 1000));
+
+      // UM ICECAST NO TETO DE `clients` ACEITA A CONEXÃO E DERRUBA EM SEGUIDA.
+      // A versão anterior só olhava "recebeu mais de 8 KB?": os ~48 KB do
+      // burst inicial bastavam, e a rejeição era contabilizada como
+      // ouvinte atendido — o check feito para provar "ouvintes ilimitados"
+      // pontuava a recusa como aprovação.
+      const fim = new Promise((resolve) => {
+        res.on('end', () => { encerrouCedo = 'servidor encerrou'; resolve(); });
+        res.on('aborted', () => { encerrouCedo = 'conexão abortada'; resolve(); });
+        res.on('error', (e) => { encerrouCedo = e.message; resolve(); });
+        setTimeout(resolve, holdSeconds * 1000);
+      });
+      await fim;
       req.destroy();
-      if (bytes < minBytes) throw new Error(`conexão ${i}: só ${bytes} bytes`);
+
+      if (encerrouCedo) {
+        throw new Error(`conexão ${i}: ${encerrouCedo} após ${bytes} bytes (esperado ~${Math.round(esperadoBytes)})`);
+      }
+      if (bytes < minBytes) {
+        throw new Error(
+          `conexão ${i}: recebeu ${bytes} bytes, esperado ao menos ${Math.round(minBytes)} ` +
+          `(${expectedKbps} kbps × ${holdSeconds}s) — servidor aceitou e estrangulou`
+        );
+      }
       return bytes;
     })
   );
@@ -216,6 +334,7 @@ export async function concurrentListeners(url, n, { holdSeconds = 10, minBytes =
     succeeded: ok.length,
     failed: n - ok.length,
     totalBytes: ok.reduce((s, r) => s + r.value, 0),
+    esperadoPorConexao: Math.round(esperadoBytes),
     errors: results.filter((r) => r.status === 'rejected').map((r) => String(r.reason)).slice(0, 5),
   };
 }

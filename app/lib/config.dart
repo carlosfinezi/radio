@@ -22,6 +22,10 @@ class Config {
   /// Metadados públicos do "tocando agora" (não exige autenticação).
   static const String nowPlayingApi = 'https://$host/api/nowplaying/$stationSlug';
 
+  /// Player web público. A raiz do domínio é o painel administrativo do
+  /// AzuraCast — mandar o ouvinte para lá seria expor a tela de login.
+  static const String playerWebUrl = 'https://$host/player.html';
+
   static const String stationName = 'Web Rádio Porto do Capim';
   static const String stationSubtitle = 'Universidade Federal da Paraíba';
 

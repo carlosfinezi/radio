@@ -1,0 +1,10 @@
+import { openStream } from '/root/webradio/validation/lib/probe.mjs';
+const t0=Date.now();
+const {status,headers,req,res}=await openStream('http://127.0.0.1:9912/x',{headers:{'Icy-MetaData':'1'},timeoutMs:30000});
+console.log('resp em',Date.now()-t0,'ms status',status);
+let b=0;
+res.on('data',c=>{b+=c.length;console.log('data',c.length,'em',Date.now()-t0,'ms');});
+res.on('end',()=>console.log('END em',Date.now()-t0,'ms total',b));
+res.on('close',()=>console.log('CLOSE em',Date.now()-t0));
+res.on('error',e=>console.log('ERR',e.message,Date.now()-t0));
+setTimeout(()=>{console.log('fim janela, bytes=',b);process.exit(0);},16000);
