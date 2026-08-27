@@ -1,0 +1,38 @@
+name: radio_porto_do_capim
+description: Aplicativo oficial da Web Rádio Porto do Capim
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Reprodução de áudio com suporte a HLS em Android e iOS.
+  # Licença Apache-2.0/MIT — sem cláusula comercial.
+  just_audio: ^0.10.6
+
+  # Controles de tela de bloqueio, notificação, Android Auto e CarPlay.
+  # Licença MIT.
+  #
+  # NOTA DE LICENCIAMENTO: descartamos react_native_track_player /
+  # audio_service equivalentes de licença comercial. A v5+ do
+  # react-native-track-player exige licença paga para uso comercial, e este
+  # é um contrato remunerado. just_audio + audio_service são as alternativas
+  # sem ônus e sem risco jurídico.
+  audio_service: ^0.18.19
+
+  http: ^1.2.0
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
