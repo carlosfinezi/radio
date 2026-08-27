@@ -109,7 +109,7 @@ preflight() {
     local cv
     cv=$(docker compose version --short 2>/dev/null || echo "0")
     ok "Docker presente; Compose $cv"
-    if ! printf '%s\n2.24.0\n' "$cv" | sort -V -C; then
+    if !  printf '2.24.0\n%s\n' "$cv" | sort -V -C; then
       warn "Compose $cv pode não suportar a tag !override (precisa >= 2.24)."
       warn "Sem ela, o override SOMA portas em vez de substituir — perigoso aqui."
     fi
