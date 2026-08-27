@@ -35,6 +35,7 @@ const CFG = {
   // Só alerta após N falhas seguidas: um blip de rede não é incidente,
   // e alerta que grita à toa deixa de ser lido.
   alertAfter: Number(val('--alert-after', 3)),
+  warmupSeconds: 3,
   minBytes: 4096,
   probeSeconds: 5,
 };
@@ -55,15 +56,24 @@ async function sample() {
     const latency = Date.now() - t0;
     if (status !== 200) { req.destroy(); return { up: false, latency, detail: `HTTP ${status}` }; }
 
+    // Descarta o burst inicial antes de contar, como faz a sonda da suíte.
+    // Sem isso o log registrava ~290 kbps para um stream de 192, porque o
+    // Icecast despeja o buffer de arranque a toda velocidade do link. Num
+    // arquivo que é evidência contratual, número inflado convida contestação.
     let bytes = 0;
-    res.on('data', (c) => { bytes += c.length; });
+    let medindoDesde = null;
+    res.on('data', (c) => { if (medindoDesde !== null) bytes += c.length; });
+
+    await new Promise((r) => setTimeout(r, CFG.warmupSeconds * 1000));
+    medindoDesde = Date.now();
     await new Promise((r) => setTimeout(r, CFG.probeSeconds * 1000));
+    const decorridoMs = Date.now() - medindoDesde;
     req.destroy();
 
     if (bytes < CFG.minBytes) {
-      return { up: false, latency, detail: `respondeu 200 mas entregou só ${bytes} bytes (stream mudo)` };
+      return { up: false, latency, detail: `respondeu 200 mas entregou só ${bytes} bytes após o warmup (stream mudo)` };
     }
-    const kbps = (bytes * 8) / (CFG.probeSeconds * 1000);
+    const kbps = (bytes * 8) / decorridoMs;
     return { up: true, latency, detail: `200 OK; ${kbps.toFixed(1)} kbps` };
   } catch (e) {
     return { up: false, latency: Date.now() - t0, detail: e.message.slice(0, 120) };

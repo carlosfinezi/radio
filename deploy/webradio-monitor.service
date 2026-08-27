@@ -1,0 +1,16 @@
+[Unit]
+Description=Web Radio Porto do Capim - monitor de disponibilidade (SLA)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/webradio
+Environment=STREAM_URL=https://radio.liciteagora.app/listen/porto_do_capim/radio.mp3
+Environment=UPTIME_LOG=/var/log/webradio/uptime.csv
+ExecStart=/usr/bin/node /root/webradio/reports/uptime-monitor.mjs --interval 60 --alert-after 3 --alert-cmd /root/webradio/deploy/alerta.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -514,9 +514,17 @@ export const requirements = [
         async run({ cfg }) {
           const r = await azuraApi(cfg.baseUrl, cfg.apiKey, `/api/station/${cfg.station}/status`);
           const s = r.json || {};
+          // O endpoint /status devolve camelCase (backendRunning), diferente
+          // do resto da API, que usa snake_case (is_enabled, station_id).
+          // Ler só uma das grafias reportava `undefined` e reprovava um
+          // sistema perfeitamente no ar.
+          const backend = s.backendRunning ?? s.backend_running;
+          const frontend = s.frontendRunning ?? s.frontend_running;
           return {
-            pass: r.status === 200 && s.backend_running === true && s.frontend_running === true,
-            evidence: `backend(AutoDJ)=${s.backend_running} frontend(Icecast)=${s.frontend_running}`,
+            pass: r.status === 200 && backend === true && frontend === true,
+            evidence: r.status !== 200
+              ? `API respondeu HTTP ${r.status}`
+              : `backend(AutoDJ)=${backend} frontend(Icecast)=${frontend}`,
             detail: s,
           };
         },

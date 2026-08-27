@@ -17,10 +17,19 @@ server {
     client_max_body_size 2048m;
 
     # ─────────────────────────────────────────────────────────────────
-    # Stream contínuo do Icecast (MP3/AAC)
+    # Stream contínuo (MP3/AAC)
     # ─────────────────────────────────────────────────────────────────
+    # Vai para o AzuraCast (8081), NÃO direto para o Icecast (8005).
+    #
+    # O mount no Icecast chama-se apenas `/radio.mp3`; quem traduz
+    # `/listen/{estacao}/{mount}` para o mount certo é o nginx interno do
+    # AzuraCast. Apontar para o Icecast com `proxy_pass .../` reescrevia a
+    # URL para `/porto_do_capim/radio.mp3`, que não existe lá: 404 no
+    # endpoint público com a rádio tocando perfeitamente por dentro.
+    #
+    # Sem barra final no proxy_pass: preserva o caminho original.
     location /listen/ {
-        proxy_pass http://127.0.0.1:8005/;
+        proxy_pass http://127.0.0.1:8081;
         proxy_http_version 1.1;
 
         # CRÍTICO. Com buffering ligado o nginx acumula o áudio antes de
@@ -39,8 +48,11 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # Player web embutido em site de terceiro (alínea c do edital).
-        add_header Access-Control-Allow-Origin '*' always;
+        # NÃO adicionar Access-Control-Allow-Origin aqui.
+        # O nginx interno do AzuraCast já envia esse cabeçalho. Somando o
+        # nosso, a resposta saía com "Access-Control-Allow-Origin: *, *" —
+        # valor inválido que o navegador rejeita, quebrando exatamente o
+        # player embutido em site de terceiro que a alínea (c) exige.
     }
 
     # ─────────────────────────────────────────────────────────────────
@@ -53,21 +65,17 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        add_header Access-Control-Allow-Origin '*' always;
-
         # O manifesto muda a cada segmento; os segmentos são imutáveis.
         # Cachear o .m3u8 congelaria a rádio no passado.
         location ~ \.m3u8$ {
             proxy_pass http://127.0.0.1:8081;
             add_header Cache-Control 'no-cache, no-store, must-revalidate' always;
-            add_header Access-Control-Allow-Origin '*' always;
         }
         location ~ \.(aac|ts|mp4|m4s)$ {
             proxy_pass http://127.0.0.1:8081;
             # Segmento nomeado nunca muda de conteúdo -> cacheável de verdade.
             # É isto que permite ao CDN/edge absorver a escala.
             add_header Cache-Control 'public, max-age=31536000, immutable' always;
-            add_header Access-Control-Allow-Origin '*' always;
         }
     }
 
