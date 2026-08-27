@@ -149,11 +149,27 @@ configurar_daemon() {
 JSON
     ok "daemon.json criado"
   fi
-  systemctl is-active --quiet docker && { systemctl restart docker; ok "docker reiniciado"; }
+  # NÃO usar `cmd && { ...; }` aqui.
+  # Sob `set -e`, uma lista AND-OR cujo primeiro comando falha faz a FUNÇÃO
+  # inteira retornar não-zero, e o script morre em silêncio. Foi exatamente o
+  # que aconteceu em 27/08/2026: `systemctl is-active --quiet docker` devolve 4
+  # quando o Docker não está instalado, e o instalador abortou logo depois de
+  # imprimir "daemon.json criado", sem mensagem de erro nenhuma.
+  if systemctl is-active --quiet docker; then
+    systemctl restart docker
+    ok "docker reiniciado para aplicar o daemon.json"
+  else
+    ok "docker ainda não está ativo — daemon.json valerá na primeira subida"
+  fi
 }
 
 install_docker() {
-  command -v docker >/dev/null 2>&1 && { ok "Docker já instalado"; return; }
+  # Mesma armadilha da função acima: com `&& { ...; return; }`, a ausência do
+  # Docker (o caso normal na primeira execução) derrubaria o script aqui.
+  if command -v docker >/dev/null 2>&1; then
+    ok "Docker já instalado ($(docker --version))"
+    return 0
+  fi
   step "Instalando Docker"
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
