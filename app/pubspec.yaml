@@ -1,5 +1,5 @@
-name: radio_porto_do_capim
-description: Aplicativo oficial da Web Rádio Porto do Capim
+name: bitradio
+description: BitRádio — rádios ao vivo da plataforma 1bit
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -33,6 +33,10 @@ dependencies:
 
   http: ^1.2.0
   intl: ^0.19.0
+
+  # Guarda a emissora escolhida no aparelho. Sem persistência, o app
+  # perguntaria qual rádio abrir a cada abertura.
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   flutter_test:

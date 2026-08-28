@@ -6,19 +6,25 @@ import 'package:just_audio/just_audio.dart';
 import 'package:http/http.dart' as http;
 
 import 'config.dart';
+import 'emissora.dart';
 
 /// Handler de áudio que roda em segundo plano.
 ///
-/// Responsável por três coisas que o edital exige na alínea (h) e que a loja
-/// da Apple exige para aprovar o app:
+/// Atende ao que as lojas exigem de um app de rádio:
 ///   1. o áudio continua com a tela bloqueada;
-///   2. os controles aparecem na tela de bloqueio / Central de Controle;
-///   3. o título da música corrente acompanha o que está no ar.
+///   2. os controles aparecem na tela de bloqueio e na notificação;
+///   3. o título da música acompanha o que está no ar.
 ///
-/// Um quarto item, que o edital chama de "contínuo e ininterrupto": queda de
+/// E um quarto que o contrato chama de "contínuo e ininterrupto": queda de
 /// rede não pode encerrar a sessão. Ver [_agendarReconexao].
+///
+/// MULTI-EMISSORA: a estação não é mais constante. Chega por [trocarEmissora],
+/// o que permite o ouvinte mudar de rádio sem reiniciar o app.
 class RadioAudioHandler extends BaseAudioHandler {
   final _player = AudioPlayer();
+
+  Emissora? _emissora;
+  Emissora? get emissora => _emissora;
 
   Timer? _metadataTimer;
   Timer? _reconexaoTimer;
@@ -27,13 +33,12 @@ class RadioAudioHandler extends BaseAudioHandler {
   /// Controla se a fonte precisa ser recarregada antes do próximo play.
   ///
   /// NÃO usar `_player.audioSource == null` para isso: em just_audio 0.10.x
-  /// esse getter passa a devolver um valor não-nulo após o primeiro load e
-  /// nunca mais volta a ser null — nem depois de `stop()`. Confiar nele fazia
-  /// o app tocar UMA vez e ficar em silêncio permanente a partir do segundo
-  /// play, porque o carregamento era pulado sobre uma playlist vazia.
+  /// esse getter passa a devolver valor não-nulo após o primeiro load e nunca
+  /// mais volta a ser null — nem depois de `stop()`. Confiar nele fazia o app
+  /// tocar UMA vez e ficar em silêncio permanente a partir do segundo play.
   bool _precisaCarregar = true;
 
-  /// Se estamos usando o caminho MP3 porque o HLS falhou.
+  /// Se estamos no caminho MP3 porque o HLS falhou.
   bool _usandoFallback = false;
 
   int _tentativasReconexao = 0;
@@ -41,23 +46,37 @@ class RadioAudioHandler extends BaseAudioHandler {
   RadioAudioHandler() {
     _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
 
-    // just_audio 0.10 moveu os erros de reprodução de
-    // `playbackEventStream.onError` para um stream dedicado. Sem escutar
-    // aqui, queda de rede, 404 ou troca de wifi para 4G passavam
-    // despercebidos: a interface seguia exibindo "AO VIVO" em silêncio.
+    // just_audio 0.10 moveu os erros de `playbackEventStream.onError` para um
+    // stream dedicado. Sem escutar aqui, queda de rede, 404 ou troca de wifi
+    // para 4G passavam despercebidos: a interface seguia exibindo "AO VIVO"
+    // em silêncio.
     _erroSub = _player.errorStream.listen((e) {
       _publicarErro(e.toString());
       _agendarReconexao();
     });
-
-    _definirItemInicial();
   }
 
-  void _definirItemInicial() {
-    mediaItem.add(const MediaItem(
-      id: Config.streamHls,
-      title: Config.stationName,
-      artist: Config.stationSubtitle,
+  // ── Emissora ───────────────────────────────────────────────────────────
+
+  /// Troca a emissora corrente. Para o que estiver tocando e prepara a nova.
+  Future<void> trocarEmissora(Emissora nova) async {
+    final tocava = _player.playing;
+    await pause();
+    _emissora = nova;
+    _precisaCarregar = true;
+    _usandoFallback = false;
+    _tentativasReconexao = 0;
+    _publicarItemInicial();
+    if (tocava) await play();
+  }
+
+  void _publicarItemInicial() {
+    final e = _emissora;
+    if (e == null) return;
+    mediaItem.add(MediaItem(
+      id: e.urlPreferida,
+      title: e.nome,
+      artist: Config.appNome,
       isLive: true,
       // duration nulo == transmissão contínua, sem barra de progresso
     ));
@@ -67,6 +86,7 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> play() async {
+    if (_emissora == null) return;   // sem emissora escolhida, nada a tocar
     _reconexaoTimer?.cancel();
     if (_precisaCarregar) {
       await _carregarComFallback();
@@ -79,8 +99,8 @@ class RadioAudioHandler extends BaseAudioHandler {
   /// Numa rádio ao vivo não existe "retomar de onde parou": ao voltar, o
   /// ouvinte tem que ouvir o que está no ar AGORA, não o buffer velho.
   /// Por isso pausar descarta a fonte — mas, diferente de [stop], mantém a
-  /// sessão de mídia viva para que o botão play do fone, do carro e da tela
-  /// de bloqueio continuem funcionando.
+  /// sessão de mídia viva para o botão do fone, do carro e da tela de
+  /// bloqueio continuarem funcionando.
   @override
   Future<void> pause() async {
     _metadataTimer?.cancel();
@@ -100,14 +120,13 @@ class RadioAudioHandler extends BaseAudioHandler {
     await _player.stop();
     _precisaCarregar = true;
     // NÃO chamar `_player.dispose()` aqui. `_player` é final, criado uma
-    // única vez no construtor, e dispose marca o objeto como descartado de
-    // forma irreversível: todo método posterior vira no-op SILENCIOSO. O
-    // handler ficaria morto sem lançar exceção nenhuma. O descarte pertence
-    // ao fim de vida do handler, não ao stop.
+    // única vez, e dispose marca o objeto como descartado de forma
+    // irreversível: todo método posterior vira no-op SILENCIOSO. O handler
+    // ficaria morto sem lançar exceção nenhuma.
     await super.stop();
   }
 
-  /// Libera recursos. Chamar apenas no encerramento do handler.
+  /// Libera recursos. Só no encerramento do handler.
   Future<void> dispose() async {
     _metadataTimer?.cancel();
     _reconexaoTimer?.cancel();
@@ -117,22 +136,19 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   // ── Carga da fonte ─────────────────────────────────────────────────────
 
-  /// Tenta HLS; se falhar, cai para ICY/MP3.
+  /// Tenta HLS; se falhar, cai para o stream contínuo.
   ///
   /// O fallback não é preciosismo: redes corporativas e alguns provedores
   /// móveis bloqueiam `.m3u8` por inspeção de conteúdo, e sem o segundo
   /// caminho o app simplesmente não toca para esse ouvinte.
   Future<void> _carregarComFallback() async {
+    final e = _emissora!;
     try {
-      await _player.setAudioSource(
-        AudioSource.uri(Uri.parse(Config.streamHls)),
-      );
-      _usandoFallback = false;
+      await _player.setAudioSource(AudioSource.uri(Uri.parse(e.urlPreferida)));
+      _usandoFallback = e.urlHls == null;
       _precisaCarregar = false;
     } catch (_) {
-      await _player.setAudioSource(
-        AudioSource.uri(Uri.parse(Config.streamIcy)),
-      );
+      await _player.setAudioSource(AudioSource.uri(Uri.parse(e.urlStream)));
       _usandoFallback = true;
       _precisaCarregar = false;
     }
@@ -142,21 +158,22 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   /// Recuo exponencial limitado a 30s.
   ///
-  /// A cada segunda tentativa alterna entre HLS e MP3: se o problema for o
-  /// transporte (proxy bloqueando .m3u8, por exemplo), insistir no mesmo
-  /// caminho nunca recupera.
+  /// A cada segunda tentativa alterna o transporte: se o problema for o
+  /// caminho (proxy bloqueando .m3u8, por exemplo), insistir no mesmo nunca
+  /// recupera.
   void _agendarReconexao() {
+    final e = _emissora;
+    if (e == null) return;
+
     _reconexaoTimer?.cancel();
     _tentativasReconexao++;
 
     final segundos = (1 << (_tentativasReconexao.clamp(1, 5))).clamp(2, 30);
     _reconexaoTimer = Timer(Duration(seconds: segundos), () async {
       try {
-        if (_tentativasReconexao.isEven) {
-          // alterna o transporte
-          await _player.setAudioSource(AudioSource.uri(
-            Uri.parse(_usandoFallback ? Config.streamHls : Config.streamIcy),
-          ));
+        if (_tentativasReconexao.isEven && e.urlHls != null) {
+          final url = _usandoFallback ? e.urlHls! : e.urlStream;
+          await _player.setAudioSource(AudioSource.uri(Uri.parse(url)));
           _usandoFallback = !_usandoFallback;
           _precisaCarregar = false;
         } else {
@@ -165,8 +182,8 @@ class RadioAudioHandler extends BaseAudioHandler {
         }
         await _player.play();
         _tentativasReconexao = 0;
-      } catch (e) {
-        _publicarErro(e.toString());
+      } catch (erro) {
+        _publicarErro(erro.toString());
         _agendarReconexao();
       }
     });
@@ -191,9 +208,11 @@ class RadioAudioHandler extends BaseAudioHandler {
   }
 
   Future<void> _atualizarMetadados() async {
+    final e = _emissora;
+    if (e == null) return;
     try {
       final r = await http
-          .get(Uri.parse(Config.nowPlayingApi))
+          .get(Uri.parse(e.urlNowPlaying))
           .timeout(const Duration(seconds: 10));
       if (r.statusCode != 200) return;
 
@@ -206,12 +225,10 @@ class RadioAudioHandler extends BaseAudioHandler {
       final artista = song['artist'] as String?;
 
       mediaItem.add(MediaItem(
-        id: Config.streamHls,
-        title: (titulo != null && titulo.isNotEmpty) ? titulo : Config.stationName,
-        artist: (artista != null && artista.isNotEmpty)
-            ? artista
-            : Config.stationSubtitle,
-        album: Config.stationName,
+        id: e.urlPreferida,
+        title: (titulo != null && titulo.isNotEmpty) ? titulo : e.nome,
+        artist: (artista != null && artista.isNotEmpty) ? artista : e.nome,
+        album: e.nome,
         artUri: (art != null && art.isNotEmpty) ? Uri.tryParse(art) : null,
         isLive: true,
       ));
@@ -239,9 +256,9 @@ class RadioAudioHandler extends BaseAudioHandler {
         ProcessingState.completed => AudioProcessingState.completed,
       },
       playing: _player.playing,
-      // Transmissão ao vivo não tem posição navegável. Publicamos zero em vez
-      // da posição real para que a tela de bloqueio não desenhe uma barra de
-      // progresso mentirosa — motivo recorrente de rejeição na App Store.
+      // Transmissão ao vivo não tem posição navegável. Publicamos zero para
+      // a tela de bloqueio não desenhar uma barra de progresso mentirosa —
+      // motivo recorrente de rejeição na App Store.
       updatePosition: Duration.zero,
       bufferedPosition: Duration.zero,
     );

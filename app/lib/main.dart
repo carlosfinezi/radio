@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 
 import 'audio_handler.dart';
 import 'config.dart';
+import 'emissora.dart';
+import 'preferencias.dart';
 import 'schedule_page.dart';
+import 'selecao_page.dart';
 
 late RadioAudioHandler audioHandler;
 
@@ -13,8 +16,8 @@ Future<void> main() async {
   audioHandler = await AudioService.init(
     builder: () => RadioAudioHandler(),
     config: const AudioServiceConfig(
-      androidNotificationChannelId: 'br.ufpb.radioportodocapim.audio',
-      androidNotificationChannelName: 'Web Rádio Porto do Capim',
+      androidNotificationChannelId: 'br.net.onebit.bitradio.audio',
+      androidNotificationChannelName: 'BitRádio',
       // Mantém a notificação viva com o app em segundo plano: sem isso o
       // Android mata o processo e o áudio corta ao trocar de app.
       androidNotificationOngoing: true,
@@ -22,37 +25,129 @@ Future<void> main() async {
     ),
   );
 
-  runApp(const RadioApp());
+  runApp(const BitRadioApp());
 }
 
-class RadioApp extends StatelessWidget {
-  const RadioApp({super.key});
+class BitRadioApp extends StatelessWidget {
+  const BitRadioApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: Config.stationName,
+      title: Config.appNome,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00695C),
+          seedColor: const Color(0xFF12897A),   // mesma cor do ícone e do player web
           brightness: Brightness.dark,
         ),
       ),
-      home: const HomeShell(),
+      home: const Roteador(),
+    );
+  }
+}
+
+/// Decide a primeira tela: seleção (primeira abertura) ou player.
+class Roteador extends StatefulWidget {
+  const Roteador({super.key});
+  @override
+  State<Roteador> createState() => _RoteadorState();
+}
+
+class _RoteadorState extends State<Roteador> {
+  bool _carregando = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _iniciar();
+  }
+
+  Future<void> _iniciar() async {
+    // Carrega do disco, não da rede: sem isso o app abriria numa tela de
+    // erro quando o ouvinte estivesse sem conexão, em vez de tentar tocar.
+    final salva = await Preferencias.emissoraSalva();
+    if (salva != null) {
+      await audioHandler.trocarEmissora(salva);
+    }
+    if (mounted) setState(() => _carregando = false);
+  }
+
+  Future<void> _abrirSelecao({bool podeVoltar = false}) async {
+    final escolhida = await Navigator.of(context).push<Emissora>(
+      MaterialPageRoute(builder: (_) => SelecaoPage(podeVoltar: podeVoltar)),
+    );
+    if (escolhida != null) {
+      await audioHandler.trocarEmissora(escolhida);
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_carregando) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (audioHandler.emissora == null) {
+      return _PrimeiraAbertura(aoEscolher: () => _abrirSelecao());
+    }
+    return HomeShell(aoTrocarEmissora: () => _abrirSelecao(podeVoltar: true));
+  }
+}
+
+/// Tela de boas-vindas da primeira abertura.
+class _PrimeiraAbertura extends StatelessWidget {
+  final VoidCallback aoEscolher;
+  const _PrimeiraAbertura({required this.aoEscolher});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.podcasts, size: 88, color: cs.primary),
+              const SizedBox(height: 24),
+              Text(Config.appNome,
+                  style: Theme.of(context).textTheme.headlineMedium),
+              const SizedBox(height: 8),
+              Text(
+                'Rádios ao vivo, direto do seu aparelho.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyLarge
+                    ?.copyWith(color: cs.onSurfaceVariant),
+              ),
+              const SizedBox(height: 40),
+              FilledButton.icon(
+                onPressed: aoEscolher,
+                icon: const Icon(Icons.search),
+                label: const Text('Escolher emissora'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
 
 /// Casca com abas.
 ///
-/// O app tem deliberadamente mais do que um botão de play. A diretriz 4.2
-/// da App Store ("funcionalidade mínima") rejeita aplicativos que são só um
+/// O app tem deliberadamente mais do que um botão de play. A diretriz 4.2 da
+/// App Store ("funcionalidade mínima") rejeita aplicativos que são só um
 /// player embrulhado; grade de programação e informações da emissora são o
 /// que sustenta a aprovação — e são úteis ao ouvinte de qualquer forma.
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  final VoidCallback aoTrocarEmissora;
+  const HomeShell({super.key, required this.aoTrocarEmissora});
+
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
@@ -62,10 +157,25 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    final e = audioHandler.emissora!;
     return Scaffold(
+      appBar: AppBar(
+        title: Text(e.nome, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            tooltip: 'Trocar de emissora',
+            icon: const Icon(Icons.swap_horiz),
+            onPressed: widget.aoTrocarEmissora,
+          ),
+        ],
+      ),
       body: IndexedStack(
         index: _aba,
-        children: const [PlayerPage(), SchedulePage(), AboutPage()],
+        children: [
+          const PlayerPage(),
+          SchedulePage(emissora: e),
+          const AboutPage(),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _aba,
@@ -93,7 +203,6 @@ class PlayerPage extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // ── Capa / metadados ──────────────────────────────────────
             StreamBuilder<MediaItem?>(
               stream: audioHandler.mediaItem,
               builder: (context, snap) {
@@ -119,7 +228,7 @@ class PlayerPage extends StatelessWidget {
                     ),
                     const SizedBox(height: 28),
                     Text(
-                      item?.title ?? Config.stationName,
+                      item?.title ?? '—',
                       style: Theme.of(context).textTheme.headlineSmall,
                       textAlign: TextAlign.center,
                       maxLines: 2,
@@ -127,10 +236,11 @@ class PlayerPage extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      item?.artist ?? Config.stationSubtitle,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
+                      item?.artist ?? '',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodyLarge
+                          ?.copyWith(color: cs.onSurfaceVariant),
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -140,7 +250,6 @@ class PlayerPage extends StatelessWidget {
 
             const SizedBox(height: 36),
 
-            // ── Controle ──────────────────────────────────────────────
             StreamBuilder<PlaybackState>(
               stream: audioHandler.playbackState,
               builder: (context, snap) {
@@ -159,10 +268,9 @@ class PlayerPage extends StatelessWidget {
                           ? const Center(child: CircularProgressIndicator())
                           : IconButton.filled(
                               iconSize: 48,
-                              // pause() (e não stop()) mantém a sessão de
-                              // mídia viva, para que o botão do fone, do
-                              // carro e da tela de bloqueio continuem
-                              // funcionando depois de parar.
+                              // pause() e não stop(): mantém a sessão de mídia
+                              // viva, para o botão do fone e do carro
+                              // continuarem funcionando depois de parar.
                               onPressed: () => tocando
                                   ? audioHandler.pause()
                                   : audioHandler.play(),
@@ -208,27 +316,32 @@ class AboutPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final e = audioHandler.emissora;
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          Text(Config.stationName,
+          Text(e?.nome ?? Config.appNome,
               style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 8),
-          Text(Config.stationSubtitle,
-              style: Theme.of(context).textTheme.bodyLarge),
+          if (e != null && e.descricao.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(e.descricao, style: Theme.of(context).textTheme.bodyLarge),
+          ],
           const Divider(height: 40),
           const ListTile(
             leading: Icon(Icons.graphic_eq),
             title: Text('Qualidade de transmissão'),
-            subtitle: Text('128 kbps · HLS e MP3'),
+            subtitle: Text('128 kbps ou superior · HLS e MP3'),
           ),
           const ListTile(
-            leading: Icon(Icons.language),
-            title: Text('Ouça pelo navegador'),
-            // Aponta para o PLAYER público, não para a raiz do domínio —
-            // a raiz é o painel administrativo do AzuraCast.
-            subtitle: Text(Config.playerWebUrl),
+            leading: Icon(Icons.privacy_tip_outlined),
+            title: Text('Política de privacidade'),
+            subtitle: Text(Config.politicaPrivacidade),
+          ),
+          const ListTile(
+            leading: Icon(Icons.mail_outline),
+            title: Text('Contato'),
+            subtitle: Text(Config.contato),
           ),
         ],
       ),

@@ -1,36 +1,35 @@
-/// Configuração central do aplicativo.
+/// Configuração da PLATAFORMA, não de uma emissora.
 ///
-/// Os endpoints apontam para o mesmo servidor validado pela suíte de
-/// conformidade (`validation/run.mjs`). Se estas URLs divergirem das que
-/// foram medidas nas alíneas (b) e (c) do edital, o app estará entregando
-/// algo diferente do que foi auditado — por isso o check `h2` da suíte
-/// verifica justamente que este host bate com o testado.
+/// A primeira versão deste app tinha o slug da estação fixo aqui
+/// (`porto_do_capim`), o que amarrava o aplicativo inteiro a um único
+/// cliente. Como o BitRádio atende várias emissoras, a estação passou a ser
+/// escolhida em tempo de execução e guardada no aparelho — ver
+/// `preferencias.dart` e `selecao_page.dart`.
+///
+/// O que fica aqui é só o que vale para TODAS as emissoras.
 class Config {
-  /// Host público da rádio. TLS terminado no nginx do servidor.
+  /// Nome do produto, exibido na loja e no aparelho.
+  static const String appNome = 'BitRádio';
+
+  /// Servidor da plataforma. Todas as emissoras vivem sob este host —
+  /// é o mesmo AzuraCast, multi-estação.
   static const String host = 'radio.1bit.net.br';
 
-  static const String stationSlug = 'porto_do_capim';
+  static const String baseUrl = 'https://$host';
 
-  /// HLS é o transporte primário: funciona em iOS nativamente, sobrevive a
-  /// troca de rede (wifi -> 4G) e escala por cache de segmento.
-  static const String streamHls = 'https://$host/hls/$stationSlug/live.m3u8';
+  /// Lista pública de emissoras. Não exige autenticação.
+  static const String stationsApi = '$baseUrl/api/stations';
 
-  /// Fallback ICY/MP3 para casos em que o HLS falha (proxy corporativo
-  /// que bloqueia .m3u8, por exemplo).
-  static const String streamIcy = 'https://$host/listen/$stationSlug/radio.mp3';
-
-  /// Metadados públicos do "tocando agora" (não exige autenticação).
-  static const String nowPlayingApi = 'https://$host/api/nowplaying/$stationSlug';
-
-  /// Player web público. A raiz do domínio é o painel administrativo do
-  /// AzuraCast — mandar o ouvinte para lá seria expor a tela de login.
-  static const String playerWebUrl = 'https://$host/player.html';
-
-  static const String stationName = 'Web Rádio Porto do Capim';
-  static const String stationSubtitle = 'Universidade Federal da Paraíba';
-
-  /// Intervalo de atualização dos metadados. 15s é o equilíbrio entre
-  /// "a capa muda junto com a música" e não martelar o servidor com um
-  /// poll por segundo vindo de cada aparelho instalado.
+  /// Intervalo de atualização dos metadados do "tocando agora".
+  ///
+  /// 15s é o equilíbrio entre a capa mudar junto com a música e não
+  /// martelar o servidor com um poll por segundo vindo de cada aparelho
+  /// instalado. Com N clientes e M ouvintes, esse número multiplica.
   static const Duration nowPlayingInterval = Duration(seconds: 15);
+
+  /// Contato exibido na tela "Sobre" e nas notas da loja.
+  static const String contato = 'atendimento@1bit.net.br';
+
+  /// Política de privacidade — exigida pelas lojas.
+  static const String politicaPrivacidade = '$baseUrl/privacidade.html';
 }

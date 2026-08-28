@@ -4,14 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 
-import 'config.dart';
+import 'emissora.dart';
 
 /// Grade de programação, lida da API pública do AzuraCast.
 ///
 /// Atende a parte da alínea (h) que fala em "acesso à programação" — o app
 /// não é só um player, ele mostra o que vai ao ar e quando.
 class SchedulePage extends StatefulWidget {
-  const SchedulePage({super.key});
+  /// A emissora deixou de ser constante: o BitRádio atende várias, e a
+  /// grade precisa ser a de quem está tocando.
+  final Emissora emissora;
+
+  const SchedulePage({super.key, required this.emissora});
   @override
   State<SchedulePage> createState() => _SchedulePageState();
 }
@@ -26,8 +30,9 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Future<List<_Programa>> _carregar() async {
-    const url = 'https://${Config.host}/api/station/${Config.stationSlug}/schedule';
-    final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+    final r = await http
+        .get(Uri.parse(widget.emissora.urlProgramacao))
+        .timeout(const Duration(seconds: 15));
     if (r.statusCode != 200) {
       throw Exception('Não foi possível carregar a programação (HTTP ${r.statusCode})');
     }

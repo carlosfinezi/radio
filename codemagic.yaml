@@ -33,7 +33,7 @@ workflows:
         # O Codemagic cria e renova os perfis sozinho depois que a conta
         # Apple Developer estiver conectada na interface.
         distribution_type: app_store
-        bundle_identifier: br.net.onebit.radioPortoDoCapim
+        bundle_identifier: br.net.onebit.bitradio
     scripts:
       - name: Dependências
         script: flutter pub get
