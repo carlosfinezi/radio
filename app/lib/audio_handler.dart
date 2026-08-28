@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:http/http.dart' as http;
@@ -125,7 +126,7 @@ class RadioAudioHandler extends BaseAudioHandler {
     // para 4G passavam despercebidos: a interface seguia exibindo "AO VIVO"
     // em silêncio.
     _erroSub = _player.errorStream.listen((e) {
-      ultimoErro = e.toString();
+      ultimoErro = _descreverErro(e);
       _publicarErro(e.toString());
       _agendarReconexao();
     });
@@ -300,16 +301,26 @@ class RadioAudioHandler extends BaseAudioHandler {
     return null;
   }
 
-  /// Prepara a fonte de áudio SEM esperar o pré-carregamento.
+  /// Prepara a fonte de áudio sem BLOQUEAR em cima dela.
   ///
-  /// `preload: false` não é otimização, é correção. Com o preload padrão, o
-  /// Future de `setAudioSource` só completa quando a mídia está carregada e
+  /// O Future de `setAudioSource` só completa quando a mídia está carregada e
   /// com duração conhecida — e uma rádio ao vivo não tem duração nem fim.
   /// Aguardar ali prendia a troca de emissora por tempo indefinido; um
   /// timeout só trocava o travamento por uma falha garantida.
   ///
-  /// A carga acontece durante o play, e o que não deu certo chega pelo
-  /// [_player.errorStream].
+  /// A primeira saída para isso foi `preload: false`. ELA ERA A CAUSA DO
+  /// SILÊNCIO. O diagnóstico do aparelho mostrou o player em `playing: true`
+  /// com `processingState: idle` e "(2) Unexpected runtime error" — e o mesmo
+  /// erro no MP3 contínuo E no HLS, o que descarta o transporte como culpado.
+  /// Com `preload: false` o just_audio não ativa o player nativo no
+  /// setAudioSource: adia tudo para dentro do play(), e é nesse caminho adiado
+  /// que o ExoPlayer estoura. Servidor, manifesto, sessão de áudio, volume e
+  /// minificação já tinham sido verificados e estavam corretos.
+  ///
+  /// A regra que importa nunca foi o preload — é NÃO AGUARDAR. Então voltamos
+  /// ao preload padrão e simplesmente não esperamos o Future, que numa rádio
+  /// ao vivo jamais completa. O que falhar chega por [_player.errorStream] ou
+  /// pelo onError abaixo.
   Future<void> _carregarComFallback() async {
     final e = _emissora!;
     await _carregar(_transporteDisponivel(e) ?? _transporteInicial(e));
@@ -318,10 +329,16 @@ class RadioAudioHandler extends BaseAudioHandler {
   Future<void> _carregar(String url) async {
     final e = _emissora!;
     urlEmUso = url;
-    await _player.setAudioSource(
-      AudioSource.uri(Uri.parse(url)),
-      preload: false,
-    );
+    unawaited(_player.setAudioSource(AudioSource.uri(Uri.parse(url))).then<void>(
+      (_) {},
+      onError: (Object erro) {
+        // Sem este onError a falha viraria erro assíncrono não tratado: some
+        // do app e não chega em lugar nenhum que o ouvinte possa relatar.
+        ultimoErro = _descreverErro(erro);
+        _publicarErro('Falha ao abrir a transmissão.');
+        _agendarReconexao();
+      },
+    ));
     _usandoFallback = url == e.urlStream;
     _precisaCarregar = false;
   }
@@ -420,6 +437,25 @@ class RadioAudioHandler extends BaseAudioHandler {
         _agendarReconexao();
       }
     });
+  }
+
+  /// Extrai tudo que o erro carrega, não só o `toString()`.
+  ///
+  /// "(2) Unexpected runtime error" é o que o `PlayerException.toString()`
+  /// devolve, e ele ESCONDE a exceção que realmente estourou dentro do
+  /// ExoPlayer — o 2 é só `TYPE_UNEXPECTED`. Sem logcat no aparelho do
+  /// ouvinte, o `details`/`stacktrace` que vem pela ponte é a única chance de
+  /// saber a causa em vez de deduzi-la.
+  String _descreverErro(Object erro) {
+    final b = StringBuffer('${erro.runtimeType}: $erro');
+    if (erro is PlatformException) {
+      b.write(' | code=${erro.code}');
+      if (erro.details != null) b.write(' | details=${erro.details}');
+      if (erro.stacktrace != null) b.write(' | stack=${erro.stacktrace}');
+    } else if (erro is PlayerException) {
+      b.write(' | code=${erro.code}');
+    }
+    return b.toString();
   }
 
   void _publicarErro(String msg) {

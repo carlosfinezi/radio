@@ -31,12 +31,27 @@ void main() {
             'Use unawaited(_player.play()).');
   });
 
-  test('a fonte é preparada sem aguardar pré-carregamento', () {
-    // O Future de setAudioSource com preload só completa quando a mídia tem
-    // duração conhecida. Uma rádio ao vivo não tem: aguardar ali prende a
-    // troca de emissora por tempo indefinido.
-    expect(fonte.contains('preload: false'), isTrue,
-        reason: 'setAudioSource em stream ao vivo exige preload: false');
+  test('a fonte é preparada sem BLOQUEAR, e sem preload: false', () {
+    // O Future de setAudioSource só completa quando a mídia tem duração
+    // conhecida. Uma rádio ao vivo não tem: aguardar ali prende a troca de
+    // emissora por tempo indefinido.
+    //
+    // `preload: false` foi a primeira saída para isso — e era a causa do
+    // silêncio. Nesse modo o just_audio não ativa o player nativo no
+    // setAudioSource e adia a carga para dentro do play(); o ExoPlayer
+    // estourava nesse caminho com "(2) Unexpected runtime error" em QUALQUER
+    // transporte, MP3 contínuo ou HLS. A invariante que importa não é o
+    // preload, é não aguardar.
+    expect(RegExp(r'await\s+_player\s*\.\s*setAudioSource').hasMatch(fonte), isFalse,
+        reason: 'await em setAudioSource trava: o Future não completa ao vivo');
+    // Só o código: os comentários acima CITAM `preload: false` para explicar
+    // por que ele saiu, e citar não é usar.
+    final codigo = fonte
+        .split('\n')
+        .where((l) => !l.trimLeft().startsWith('//'))
+        .join('\n');
+    expect(codigo.contains('preload: false'), isFalse,
+        reason: 'preload: false deixa o ExoPlayer estourar na carga adiada');
     expect(RegExp(r'setAudioSource\([^)]*\)\s*\.timeout').hasMatch(fonte), isFalse,
         reason: 'timeout no setAudioSource troca travamento por falha certa');
   });
