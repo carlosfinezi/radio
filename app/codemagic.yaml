@@ -1,0 +1,122 @@
+# Codemagic — build de Android e iOS na nuvem.
+#
+# POR QUE ESTE ARQUIVO EXISTE:
+# Compilar para iOS exige macOS com Xcode. A 1bit não tem Mac, e não há
+# contorno legal (nem Linux, nem Docker). O Codemagic aluga o macOS por
+# minuto de build, o que sai muito mais barato que um Mac mini para o volume
+# de um app que muda pouco.
+#
+# O Android também é compilado aqui, para manter as duas plataformas na mesma
+# esteira: mesma versão de Flutter, mesmo commit, mesmo número de build.
+#
+# CONFIGURAR ANTES DO PRIMEIRO BUILD (na interface do Codemagic):
+#   Android → Code signing → subir o keystore (.jks) e criar o grupo de
+#             variáveis 'android_signing' com as senhas
+#   iOS     → Code signing → conectar a conta Apple Developer; o Codemagic
+#             gera e renova os perfis sozinho
+#   Grupo 'app_store' → variável APP_STORE_APP_ID (vem da App Store Connect)
+
+workflows:
+  # ───────────────────────────────────────────────────────────────────────
+  android:
+    name: Android — APK e AAB
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      flutter: 3.29.2          # MESMA versão validada localmente
+      java: 17                 # o Gradle moderno exige 17; com Java 8 falha
+      groups:
+        - android_signing      # keystore e senhas ficam no cofre do Codemagic
+    scripts:
+      - name: Dependências
+        script: flutter pub get
+
+      - name: Análise estática
+        # Roda ANTES de compilar: erro de Dart aparece em ~40s, em vez de
+        # esperar 10 minutos de build para descobrir.
+        script: flutter analyze
+
+      - name: Testes
+        script: flutter test
+
+      - name: APK (para instalar direto no aparelho e testar)
+        script: flutter build apk --release
+
+      - name: AAB (formato exigido pela Google Play)
+        script: flutter build appbundle --release
+
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+      - build/app/outputs/bundle/release/*.aab
+      - build/app/outputs/**/mapping.txt
+
+    publishing:
+      email:
+        recipients:
+          - atendimento@1bit.net.br
+        notify:
+          success: true
+          failure: true
+      # Para publicar automaticamente, configure a conta de serviço da Google
+      # Play e descomente. Enquanto o app está em validação, o certo é baixar
+      # o AAB do painel e enviar à mão.
+      # google_play:
+      #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+      #   track: internal
+
+  # ───────────────────────────────────────────────────────────────────────
+  ios:
+    name: iOS — IPA
+    max_build_duration: 90
+    instance_type: mac_mini_m2   # o macOS alugado; é o motivo deste arquivo
+    environment:
+      flutter: 3.29.2
+      xcode: latest
+      cocoapods: default
+      groups:
+        - app_store
+      ios_signing:
+        # O Codemagic cria e renova os perfis sozinho depois que a conta
+        # Apple Developer estiver conectada na interface.
+        distribution_type: app_store
+        bundle_identifier: br.net.onebit.radioPortoDoCapim
+    scripts:
+      - name: Dependências
+        script: flutter pub get
+
+      - name: Análise estática
+        script: flutter analyze
+
+      - name: Testes
+        script: flutter test
+
+      - name: CocoaPods
+        # just_audio e audio_service têm código nativo; sem o pod install o
+        # build falha com "module not found".
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+
+      - name: Perfis de assinatura
+        script: xcode-project use-profiles
+
+      - name: IPA
+        script: |
+          flutter build ipa --release \
+            --build-number=$(($(app-store-connect get-latest-app-store-build-number "$APP_STORE_APP_ID") + 1))
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - atendimento@1bit.net.br
+        notify:
+          success: true
+          failure: true
+      # Envio automático ao TestFlight. No primeiro build deixe comentado:
+      # é melhor baixar o IPA e conferir antes de mandar para a Apple.
+      # app_store_connect:
+      #   auth: integration
+      #   submit_to_testflight: true

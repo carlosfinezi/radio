@@ -26,7 +26,7 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Future<List<_Programa>> _carregar() async {
-    final url = 'https://${Config.host}/api/station/${Config.stationSlug}/schedule';
+    const url = 'https://${Config.host}/api/station/${Config.stationSlug}/schedule';
     final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
     if (r.statusCode != 200) {
       throw Exception('Não foi possível carregar a programação (HTTP ${r.statusCode})');
