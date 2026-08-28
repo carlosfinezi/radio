@@ -78,6 +78,33 @@ server {
         }
     }
 
+    # ── Web DJ — transmissão ao vivo pelo navegador ───────────────────
+    # O locutor fala pelo microfone e o áudio sobe por WebSocket até o
+    # harbor do Liquidsoap (porta dj_port da estação), interrompendo o AutoDJ.
+    #
+    # Precisa de bloco próprio porque o `location /` bufferiza: áudio AO VIVO
+    # bufferizado por proxy acumula atraso e corta. E o timeout padrão de 1h
+    # derrubaria um programa mais longo no meio.
+    location /webdj/ {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_buffering off;
+        proxy_request_buffering off;
+
+        # Um programa ao vivo pode passar de 4 horas.
+        proxy_read_timeout 12h;
+        proxy_send_timeout 12h;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     # ── Painel administrativo e API ───────────────────────────────────
     location / {
         proxy_pass http://127.0.0.1:8081;
