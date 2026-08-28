@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:http/http.dart' as http;
 
@@ -45,6 +46,8 @@ class RadioAudioHandler extends BaseAudioHandler {
   int _tentativasReconexao = 0;
 
   RadioAudioHandler() {
+    _configurarSessaoDeAudio();
+
     // listen(), NÃO pipe(). ISTO É O QUE FAZIA A RÁDIO NÃO TOCAR.
     //
     // `Stream.pipe(consumer)` equivale a `consumer.addStream(stream)`, e
@@ -67,6 +70,32 @@ class RadioAudioHandler extends BaseAudioHandler {
       _publicarErro(e.toString());
       _agendarReconexao();
     });
+  }
+
+  /// Configura a sessão de áudio do sistema.
+  ///
+  /// SEM ISTO O ANDROID NÃO EMITE SOM. A documentação do `just_audio.play()`
+  /// é explícita: "ativa a sessão de áudio antes da reprodução, e NÃO FAZ
+  /// NADA se a ativação falhar por qualquer motivo". Falha silenciosa — sem
+  /// exceção, sem erro, sem áudio. O pacote `audio_session` estava declarado
+  /// no pubspec e nunca era chamado; no navegador passava despercebido
+  /// porque a política de áudio da web é permissiva.
+  ///
+  /// `music()` é o perfil correto para rádio: pede foco de áudio duradouro,
+  /// abaixa o volume quando chega uma notificação em vez de cortar, e
+  /// silencia o app quando o ouvinte atende uma ligação.
+  Future<void> _configurarSessaoDeAudio() async {
+    try {
+      final sessao = await AudioSession.instance;
+      await sessao.configure(const AudioSessionConfiguration.music());
+
+      // Fone desconectado ou saída Bluetooth perdida: pausa em vez de sair
+      // tocando alto no viva-voz — comportamento esperado de app de mídia.
+      sessao.becomingNoisyEventStream.listen((_) => pause());
+    } catch (_) {
+      // Sem sessão configurada o áudio pode não sair, mas travar a
+      // construção do handler deixaria o app inteiro inutilizável.
+    }
   }
 
   // ── Emissora ───────────────────────────────────────────────────────────

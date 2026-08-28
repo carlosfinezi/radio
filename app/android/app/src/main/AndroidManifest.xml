@@ -19,12 +19,12 @@
         android:icon="@mipmap/ic_launcher">
 
         <!--
-          A activity DEVE ser AudioServiceActivity (e não FlutterActivity):
-          é ela que mantém a ponte viva com o serviço de mídia quando o app
-          vai para segundo plano.
+          MainActivity estende AudioServiceActivity (ver MainActivity.kt): é
+          ela que mantém a ponte viva com o serviço de mídia em segundo plano,
+          e que pede POST_NOTIFICATIONS no Android 13+.
         -->
         <activity
-            android:name="com.ryanheise.audioservice.AudioServiceActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""

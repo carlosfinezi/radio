@@ -41,6 +41,15 @@ void main() {
         reason: 'timeout no setAudioSource troca travamento por falha certa');
   });
 
+  test('a sessão de áudio é configurada', () {
+    // just_audio.play() "não faz nada se a ativação da sessão de áudio
+    // falhar" — silenciosamente, sem exceção. O pacote audio_session estava
+    // no pubspec e nunca era chamado: no Android o app abria, dizia AO VIVO
+    // e não emitia som nenhum.
+    expect(fonte.contains('AudioSessionConfiguration.music()'), isTrue,
+        reason: 'sem configure() da sessão o Android não emite som');
+  });
+
   test('playbackState recebe eventos por listen, nunca por pipe', () {
     // pipe() equivale a addStream, e enquanto um addStream está ativo o
     // BehaviorSubject rejeita todo add() manual com StateError. Como pause()
