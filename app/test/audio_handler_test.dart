@@ -57,6 +57,23 @@ void main() {
     // causa de a emissora escolhida nunca chegar ao player.
     expect(fonte.contains('.pipe(playbackState)'), isFalse,
         reason: 'pipe(playbackState) quebra todo add() manual de estado');
-    expect(fonte.contains('listen(playbackState.add)'), isTrue);
+    expect(fonte.contains('playbackState.add(estado)'), isTrue);
+  });
+
+  test('a reconexão alterna o transporte a cada tentativa', () {
+    // Repetir o caminho que acabou de falhar não recupera nada, e quando a
+    // repetição não emite erro novo — caso do "(2) Unexpected runtime error"
+    // do ExoPlayer no HLS — a cadeia de reconexão morre e o player fica em
+    // idle para sempre.
+    expect(fonte.contains('_tentativasReconexao.isEven'), isFalse,
+        reason: 'alternar só em tentativas pares repete o transporte quebrado');
+    expect(fonte.contains('await _alternarTransporte()'), isTrue);
+  });
+
+  test('o transporte inicial depende da plataforma', () {
+    // O ExoPlayer falha no nosso HLS; o Icecast contínuo toca. No iOS o HLS
+    // é nativo e vale o inverso.
+    expect(fonte.contains('TargetPlatform.iOS'), isTrue,
+        reason: 'Android deve começar pelo stream contínuo');
   });
 }

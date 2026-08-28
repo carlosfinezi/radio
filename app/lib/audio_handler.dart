@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:http/http.dart' as http;
@@ -80,7 +81,16 @@ class RadioAudioHandler extends BaseAudioHandler {
     // sem explicação. (O exemplo oficial do audio_service usa pipe(); ele só
     // funciona lá porque nada mais publica em playbackState.)
     _estadoSub =
-        _player.playbackEventStream.map(_transformEvent).listen(playbackState.add);
+        _player.playbackEventStream.map(_transformEvent).listen((estado) {
+      // Reprodução estabilizada zera o recuo: sem isto o contador só cresce e
+      // a próxima queda esperaria os 30s do fim da escada anterior em vez de
+      // reconectar em 2s.
+      if (estado.playing &&
+          estado.processingState == AudioProcessingState.ready) {
+        _tentativasReconexao = 0;
+      }
+      playbackState.add(estado);
+    });
 
     // just_audio 0.10 moveu os erros de `playbackEventStream.onError` para um
     // stream dedicado. Sem escutar aqui, queda de rede, 404 ou troca de wifi
@@ -223,6 +233,23 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   // ── Carga da fonte ─────────────────────────────────────────────────────
 
+  /// Transporte inicial para ESTA plataforma.
+  ///
+  /// No Android o ExoPlayer falha ao carregar o nosso HLS com
+  /// "(2) Unexpected runtime error" e fica em `idle` — sem som e sem nada na
+  /// tela, porque o erro é engolido. O stream contínuo do Icecast toca sem
+  /// intercorrência no mesmo aparelho. No iOS vale o inverso: HLS é nativo e
+  /// sobrevive à troca de rede, enquanto conexão contínua é problemática.
+  ///
+  /// A preferência é só o ponto de partida: [_alternarTransporte] troca para
+  /// o outro caminho na primeira falha, então nenhum ouvinte fica preso no
+  /// transporte que não funciona no aparelho dele.
+  String _transporteInicial(Emissora e) {
+    final hls = e.urlHls;
+    if (hls == null) return e.urlStream;
+    return defaultTargetPlatform == TargetPlatform.iOS ? hls : e.urlStream;
+  }
+
   /// Prepara a fonte de áudio SEM esperar o pré-carregamento.
   ///
   /// `preload: false` não é otimização, é correção. Com o preload padrão, o
@@ -231,31 +258,50 @@ class RadioAudioHandler extends BaseAudioHandler {
   /// Aguardar ali prendia a troca de emissora por tempo indefinido; um
   /// timeout só trocava o travamento por uma falha garantida.
   ///
-  /// A carga passa a acontecer durante o play, e o que não deu certo chega
-  /// pelo [_player.errorStream] — que alterna HLS e stream contínuo a cada
-  /// tentativa. Esse revezamento é o que atende redes corporativas e
-  /// provedores móveis que bloqueiam `.m3u8` por inspeção de conteúdo.
+  /// A carga acontece durante o play, e o que não deu certo chega pelo
+  /// [_player.errorStream].
   Future<void> _carregarComFallback() async {
     final e = _emissora!;
-    urlEmUso = e.urlPreferida;
+    final url = _transporteInicial(e);
+    urlEmUso = url;
     await _player.setAudioSource(
-      AudioSource.uri(Uri.parse(e.urlPreferida)),
+      AudioSource.uri(Uri.parse(url)),
       preload: false,
     );
-    _usandoFallback = e.urlHls == null;
+    _usandoFallback = url == e.urlStream;
     _precisaCarregar = false;
+  }
+
+  /// Troca HLS por stream contínuo, ou vice-versa.
+  ///
+  /// Retorna false quando não há outro caminho para tentar.
+  Future<bool> _alternarTransporte() async {
+    final e = _emissora;
+    if (e == null || e.urlHls == null) return false;
+
+    final url = _usandoFallback ? e.urlHls! : e.urlStream;
+    urlEmUso = url;
+    await _player.setAudioSource(
+      AudioSource.uri(Uri.parse(url)),
+      preload: false,
+    );
+    _usandoFallback = !_usandoFallback;
+    _precisaCarregar = false;
+    return true;
   }
 
   // ── Reconexão ──────────────────────────────────────────────────────────
 
-  /// Recuo exponencial limitado a 30s.
+  /// Recuo exponencial limitado a 30s, ALTERNANDO O TRANSPORTE A CADA
+  /// TENTATIVA.
   ///
-  /// A cada segunda tentativa alterna o transporte: se o problema for o
-  /// caminho (proxy bloqueando .m3u8, por exemplo), insistir no mesmo nunca
-  /// recupera.
+  /// Antes só alternava em tentativas pares, então a primeira retentativa
+  /// repetia o caminho que acabara de falhar. Quando essa repetição não
+  /// emitia erro novo — que é o caso do "(2) Unexpected runtime error" do
+  /// ExoPlayer no HLS — a cadeia de reconexão morria ali e o player ficava
+  /// em `idle` para sempre: sem som, sem erro na tela e sem nova tentativa.
   void _agendarReconexao() {
-    final e = _emissora;
-    if (e == null) return;
+    if (_emissora == null) return;
 
     _reconexaoTimer?.cancel();
     _tentativasReconexao++;
@@ -263,21 +309,13 @@ class RadioAudioHandler extends BaseAudioHandler {
     final segundos = (1 << (_tentativasReconexao.clamp(1, 5))).clamp(2, 30);
     _reconexaoTimer = Timer(Duration(seconds: segundos), () async {
       try {
-        if (_tentativasReconexao.isEven && e.urlHls != null) {
-          final url = _usandoFallback ? e.urlHls! : e.urlStream;
-          urlEmUso = url;
-          await _player.setAudioSource(
-            AudioSource.uri(Uri.parse(url)),
-            preload: false,
-          );
-          _usandoFallback = !_usandoFallback;
-          _precisaCarregar = false;
-        } else {
+        // Se o transporte atual falhou, o outro é a aposta melhor. Só
+        // recarrega o mesmo quando não existe alternativa.
+        if (!await _alternarTransporte()) {
           _precisaCarregar = true;
           await _carregarComFallback();
         }
         unawaited(_player.play());   // ver play(): não completa em stream ao vivo
-        _tentativasReconexao = 0;
       } catch (erro) {
         _publicarErro(erro.toString());
         _agendarReconexao();
