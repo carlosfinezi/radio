@@ -29,7 +29,13 @@ class _SelecaoPageState extends State<SelecaoPage> {
   }
 
   Future<void> _escolher(Emissora e) async {
-    await Preferencias.salvarEmissora(e);
+    // Falha ao gravar a preferência não pode impedir a escolha: o ouvinte
+    // ouve agora e, no pior caso, escolhe de novo na próxima abertura.
+    try {
+      await Preferencias.salvarEmissora(e);
+    } catch (_) {
+      // Segue mesmo assim.
+    }
     if (mounted) Navigator.of(context).pop(e);
   }
 

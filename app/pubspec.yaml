@@ -1,7 +1,7 @@
 name: bitradio
 description: BitRádio — rádios ao vivo da plataforma 1bit
 publish_to: 'none'
-version: 1.0.2+3
+version: 1.0.3+4
 
 environment:
   # just_audio 0.10.6 e audio_service 0.18.19 exigem ambos sdk ^3.6.0 e

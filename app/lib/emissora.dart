@@ -87,20 +87,4 @@ class Emissora {
         .toList()
       ..sort((a, b) => a.nome.toLowerCase().compareTo(b.nome.toLowerCase()));
   }
-
-  /// Busca uma emissora específica pelo slug.
-  ///
-  /// Usada quando o app é aberto por link direto
-  /// (bitradio://emissora/<slug>) e a emissora ainda não está no aparelho.
-  static Future<Emissora?> buscarPorSlug(String slug) async {
-    try {
-      final todas = await buscarTodas();
-      for (final e in todas) {
-        if (e.slug == slug) return e;
-      }
-    } catch (_) {
-      // Sem rede, quem chama decide o que fazer.
-    }
-    return null;
-  }
 }

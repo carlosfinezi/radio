@@ -31,10 +31,23 @@ void main() {
             'Use unawaited(_player.play()).');
   });
 
-  test('carregar a fonte tem limite de tempo', () {
-    // setAudioSource também não lança quando o stream está inacessível — só
-    // não completa. Sem timeout, o fallback para MP3 nunca chega a rodar.
-    expect(fonte.contains('.timeout(_limiteCarga)'), isTrue,
-        reason: 'setAudioSource precisa de timeout, senão o fallback é morto');
+  test('a fonte é preparada sem aguardar pré-carregamento', () {
+    // O Future de setAudioSource com preload só completa quando a mídia tem
+    // duração conhecida. Uma rádio ao vivo não tem: aguardar ali prende a
+    // troca de emissora por tempo indefinido.
+    expect(fonte.contains('preload: false'), isTrue,
+        reason: 'setAudioSource em stream ao vivo exige preload: false');
+    expect(RegExp(r'setAudioSource\([^)]*\)\s*\.timeout').hasMatch(fonte), isFalse,
+        reason: 'timeout no setAudioSource troca travamento por falha certa');
+  });
+
+  test('playbackState recebe eventos por listen, nunca por pipe', () {
+    // pipe() equivale a addStream, e enquanto um addStream está ativo o
+    // BehaviorSubject rejeita todo add() manual com StateError. Como pause()
+    // e _publicarErro() publicam por add(), os dois lançavam sempre — era a
+    // causa de a emissora escolhida nunca chegar ao player.
+    expect(fonte.contains('.pipe(playbackState)'), isFalse,
+        reason: 'pipe(playbackState) quebra todo add() manual de estado');
+    expect(fonte.contains('listen(playbackState.add)'), isTrue);
   });
 }

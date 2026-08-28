@@ -29,6 +29,7 @@ class RadioAudioHandler extends BaseAudioHandler {
   Timer? _metadataTimer;
   Timer? _reconexaoTimer;
   StreamSubscription<Object>? _erroSub;
+  StreamSubscription<PlaybackState>? _estadoSub;
 
   /// Controla se a fonte precisa ser recarregada antes do próximo play.
   ///
@@ -44,7 +45,19 @@ class RadioAudioHandler extends BaseAudioHandler {
   int _tentativasReconexao = 0;
 
   RadioAudioHandler() {
-    _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
+    // listen(), NÃO pipe(). ISTO É O QUE FAZIA A RÁDIO NÃO TOCAR.
+    //
+    // `Stream.pipe(consumer)` equivale a `consumer.addStream(stream)`, e
+    // enquanto um addStream está ativo o BehaviorSubject REJEITA todo add()
+    // manual com StateError. Como pause() e _publicarErro() publicam estado
+    // por add(), os dois lançavam sempre — e a exceção em pause() subia por
+    // trocarEmissora(), que nunca completava: a tela de seleção voltava para
+    // o início e a emissora nunca era definida. Pior, _publicarErro() também
+    // lançava, então nem a mensagem de erro aparecia. O app ficava mudo e
+    // sem explicação. (O exemplo oficial do audio_service usa pipe(); ele só
+    // funciona lá porque nada mais publica em playbackState.)
+    _estadoSub =
+        _player.playbackEventStream.map(_transformEvent).listen(playbackState.add);
 
     // just_audio 0.10 moveu os erros de `playbackEventStream.onError` para um
     // stream dedicado. Sem escutar aqui, queda de rede, 404 ou troca de wifi
@@ -127,7 +140,7 @@ class RadioAudioHandler extends BaseAudioHandler {
     _metadataTimer?.cancel();
     await _player.stop();
     _precisaCarregar = true;
-    playbackState.add(playbackState.value.copyWith(
+    _publicarEstado(playbackState.value.copyWith(
       playing: false,
       controls: [MediaControl.play],
       processingState: AudioProcessingState.ready,
@@ -152,46 +165,31 @@ class RadioAudioHandler extends BaseAudioHandler {
     _metadataTimer?.cancel();
     _reconexaoTimer?.cancel();
     await _erroSub?.cancel();
+    await _estadoSub?.cancel();
     await _player.dispose();
   }
 
   // ── Carga da fonte ─────────────────────────────────────────────────────
 
-  /// Tempo máximo esperando uma fonte ficar pronta antes de tentar a outra.
+  /// Prepara a fonte de áudio SEM esperar o pré-carregamento.
   ///
-  /// ESTE TIMEOUT É O QUE FAZ O FALLBACK EXISTIR DE VERDADE. `setAudioSource`
-  /// não lança quando o HLS está inacessível ou com a janela de segmentos
-  /// vencida: o Future simplesmente não completa, o player fica em buffering
-  /// para sempre e o `catch` abaixo nunca roda. O sintoma é o pior possível —
-  /// sem som e sem mensagem de erro.
-  static const _limiteCarga = Duration(seconds: 12);
-
-  /// Tenta HLS; se falhar ou demorar, cai para o stream contínuo.
+  /// `preload: false` não é otimização, é correção. Com o preload padrão, o
+  /// Future de `setAudioSource` só completa quando a mídia está carregada e
+  /// com duração conhecida — e uma rádio ao vivo não tem duração nem fim.
+  /// Aguardar ali prendia a troca de emissora por tempo indefinido; um
+  /// timeout só trocava o travamento por uma falha garantida.
   ///
-  /// O fallback não é preciosismo: redes corporativas e alguns provedores
-  /// móveis bloqueiam `.m3u8` por inspeção de conteúdo, e sem o segundo
-  /// caminho o app simplesmente não toca para esse ouvinte.
+  /// A carga passa a acontecer durante o play, e o que não deu certo chega
+  /// pelo [_player.errorStream] — que alterna HLS e stream contínuo a cada
+  /// tentativa. Esse revezamento é o que atende redes corporativas e
+  /// provedores móveis que bloqueiam `.m3u8` por inspeção de conteúdo.
   Future<void> _carregarComFallback() async {
     final e = _emissora!;
-    final hls = e.urlHls;
-
-    if (hls != null) {
-      try {
-        await _player
-            .setAudioSource(AudioSource.uri(Uri.parse(hls)))
-            .timeout(_limiteCarga);
-        _usandoFallback = false;
-        _precisaCarregar = false;
-        return;
-      } catch (_) {
-        // Cai para o stream contínuo logo abaixo.
-      }
-    }
-
-    await _player
-        .setAudioSource(AudioSource.uri(Uri.parse(e.urlStream)))
-        .timeout(_limiteCarga);
-    _usandoFallback = true;
+    await _player.setAudioSource(
+      AudioSource.uri(Uri.parse(e.urlPreferida)),
+      preload: false,
+    );
+    _usandoFallback = e.urlHls == null;
     _precisaCarregar = false;
   }
 
@@ -214,7 +212,10 @@ class RadioAudioHandler extends BaseAudioHandler {
       try {
         if (_tentativasReconexao.isEven && e.urlHls != null) {
           final url = _usandoFallback ? e.urlHls! : e.urlStream;
-          await _player.setAudioSource(AudioSource.uri(Uri.parse(url)));
+          await _player.setAudioSource(
+            AudioSource.uri(Uri.parse(url)),
+            preload: false,
+          );
           _usandoFallback = !_usandoFallback;
           _precisaCarregar = false;
         } else {
@@ -231,12 +232,24 @@ class RadioAudioHandler extends BaseAudioHandler {
   }
 
   void _publicarErro(String msg) {
-    playbackState.add(playbackState.value.copyWith(
+    _publicarEstado(playbackState.value.copyWith(
       processingState: AudioProcessingState.error,
       errorMessage: msg,
       controls: [MediaControl.play],
       playing: false,
     ));
+  }
+
+  /// Publica estado sem deixar que uma falha aqui derrube quem chamou.
+  ///
+  /// Publicar estado é acessório; trocar de emissora e tocar são o essencial.
+  /// Antes, uma exceção neste ponto abortava a troca de emissora inteira.
+  void _publicarEstado(PlaybackState estado) {
+    try {
+      playbackState.add(estado);
+    } catch (_) {
+      // Sessão de mídia já encerrada — nada a publicar.
+    }
   }
 
   // ── Metadados ──────────────────────────────────────────────────────────

@@ -33,9 +33,4 @@ class Preferencias {
     final p = await SharedPreferences.getInstance();
     await p.setString(_chaveEmissora, jsonEncode(e.paraJson()));
   }
-
-  static Future<void> limpar() async {
-    final p = await SharedPreferences.getInstance();
-    await p.remove(_chaveEmissora);
-  }
 }
