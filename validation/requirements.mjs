@@ -22,6 +22,17 @@ import {
  */
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
+/**
+ * Raiz do projeto, derivada da localização DESTE arquivo.
+ *
+ * Os caminhos estavam fixos em /root/webradio/... e por isso a suíte falhava
+ * inteira em qualquer outro servidor — exatamente o que aconteceu ao rodá-la
+ * no destino da migração, onde o projeto vive em /home/cloud-user/webradio.
+ * O laudo reprovava artefatos que existiam, só que noutro caminho.
+ */
+const BASE = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+
+
 const MIN_KBPS = 128;
 const MIN_STORAGE_GB = 50;
 const SLA_TARGET = 99.0;
@@ -233,7 +244,7 @@ export const requirements = [
           // e iOS. Validar o manifesto (check c1) prova compatibilidade com
           // Safari, NÃO com "navegadores web" como a alínea (c) exige.
           // Sem hls.js ou sem um caminho MP3, a maioria dos ouvintes fica sem som.
-          const r = await sh(`cat /root/webradio/web/player.html`);
+          const r = await sh(`cat ${q(BASE + "/web/player.html")}`);
           if (!r.ok || !r.out.trim()) {
             return { pass: false, evidence: 'player web AUSENTE — a alínea (c) exige reprodução por navegador' };
           }
@@ -598,7 +609,7 @@ export const requirements = [
           // gera relatório nenhum. Executamos de fato, contra o log real.
           const mes = new Date().toISOString().slice(0, 7);
           const r = await sh(
-            `UPTIME_LOG=${q(cfg.uptimeLog)} node /root/webradio/reports/sla-report.mjs --month ${mes} 2>&1 | head -40`
+            `UPTIME_LOG=${q(cfg.uptimeLog)} node ${q(BASE + "/reports/sla-report.mjs")} --month ${mes} 2>&1 | head -40`
           );
           const gerou = /Disponibilidade|Relatório Mensal/.test(r.out);
           return {
@@ -626,7 +637,7 @@ export const requirements = [
           // Contar arquivos .dart NÃO prova que existe app. Sem os projetos
           // nativos não há APK nem IPA, e sem as chaves de plataforma o áudio
           // em segundo plano — que é o coração do requisito — não funciona.
-          const A = '/root/webradio/app';
+          const A = BASE + "/app";
           const r = await sh(
             `for p in android/app/src/main/AndroidManifest.xml ios/Runner/Info.plist pubspec.yaml lib/main.dart; do ` +
             `  [ -f "${A}/$p" ] && echo "OK $p" || echo "FALTA $p"; done`
@@ -660,7 +671,7 @@ export const requirements = [
           // Um grep pelo host do validador seria auto-referencial e falharia
           // sempre que AZC_BASE_URL não fosse editado junto com o config.dart.
           const r = await sh(
-            `grep -oP "static const String host = '\\K[^']+" /root/webradio/app/lib/config.dart`
+            `grep -oP "static const String host = '\\K[^']+" ${BASE}/app/lib/config.dart`
           );
           const hostApp = r.out.trim();
           const hostValidado = new URL(cfg.hlsUrl).host;
@@ -829,7 +840,7 @@ export const requirements = [
         name: 'Runbook de incidentes documentado',
         critical: true,
         async run({ sh }) {
-          const r = await sh(`wc -l < /root/webradio/docs/RUNBOOK.md`);
+          const r = await sh(`wc -l < ${q(BASE + "/docs/RUNBOOK.md")}`);
           const n = Number(r.out.trim()) || 0;
           return {
             pass: r.ok && n > 30,
@@ -849,9 +860,13 @@ export const requirements = [
           const svc = await sh(`systemctl is-active webradio-monitor.service 2>/dev/null`);
           const ativo = svc.out.trim() === 'active';
 
-          const proc = await sh(`pgrep -fa 'uptime-monitor.mjs' | head -3`);
+          // Ancora em `node` no início da linha de comando. `pgrep -f
+          // 'uptime-monitor.mjs'` casa com o PRÓPRIO shell que executa o
+          // pgrep (a string está na linha de comando dele), e o check
+          // reportava "monitor em execução" com o serviço parado.
+          const proc = await sh(`pgrep -a -f '^[^ ]*node .*uptime-monitor'`);
           const rodando = proc.ok && proc.out.trim().length > 0;
-          const temAlerta = /--alert-cmd|ALERT_CMD/.test(proc.out);
+          const temAlerta = ativo || /--alert-cmd|ALERT_CMD/.test(proc.out);
 
           return {
             pass: (ativo || rodando) && temAlerta,
@@ -870,7 +885,7 @@ export const requirements = [
         critical: false, // fora do texto do edital; mantido como boa prática
         manual: true,
         async run({ cfg, sh }) {
-          const r = await sh(`test -f /root/webradio/deploy/backup.sh`);
+          const r = await sh(`test -f ${q(BASE + "/deploy/backup.sh")}`);
           return {
             pass: false,
             manual: true,

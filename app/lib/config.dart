@@ -6,8 +6,8 @@
 /// algo diferente do que foi auditado — por isso o check `h2` da suíte
 /// verifica justamente que este host bate com o testado.
 class Config {
-  /// Host público da rádio (proxy do HestiaCP, TLS terminado aqui).
-  static const String host = 'radio.liciteagora.app';
+  /// Host público da rádio. TLS terminado no nginx do servidor.
+  static const String host = 'radio.1bit.net.br';
 
   static const String stationSlug = 'porto_do_capim';
 
