@@ -45,6 +45,26 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   int _tentativasReconexao = 0;
 
+  // ── Espelhos para a tela de diagnóstico ────────────────────────────────
+  // O estado interno do player não é observável de fora, e sem logcat no
+  // aparelho do ouvinte é o único jeito de saber por que não sai som.
+
+  /// A sessão de áudio foi configurada com sucesso? Se não, o just_audio
+  /// silenciosamente não reproduz nada.
+  bool sessaoConfigurada = false;
+
+  /// Motivo da falha ao configurar a sessão, quando houver.
+  String? erroSessao;
+
+  /// Último erro vindo do player, mesmo que já tenha sido superado.
+  String? ultimoErro;
+
+  /// URL efetivamente entregue ao player.
+  String? urlEmUso;
+
+  bool get usandoFallback => _usandoFallback;
+  double get volume => _player.volume;
+
   RadioAudioHandler() {
     _configurarSessaoDeAudio();
 
@@ -67,6 +87,7 @@ class RadioAudioHandler extends BaseAudioHandler {
     // para 4G passavam despercebidos: a interface seguia exibindo "AO VIVO"
     // em silêncio.
     _erroSub = _player.errorStream.listen((e) {
+      ultimoErro = e.toString();
       _publicarErro(e.toString());
       _agendarReconexao();
     });
@@ -88,11 +109,13 @@ class RadioAudioHandler extends BaseAudioHandler {
     try {
       final sessao = await AudioSession.instance;
       await sessao.configure(const AudioSessionConfiguration.music());
+      sessaoConfigurada = true;
 
       // Fone desconectado ou saída Bluetooth perdida: pausa em vez de sair
       // tocando alto no viva-voz — comportamento esperado de app de mídia.
       sessao.becomingNoisyEventStream.listen((_) => pause());
-    } catch (_) {
+    } catch (erro) {
+      erroSessao = erro.toString();
       // Sem sessão configurada o áudio pode não sair, mas travar a
       // construção do handler deixaria o app inteiro inutilizável.
     }
@@ -214,6 +237,7 @@ class RadioAudioHandler extends BaseAudioHandler {
   /// provedores móveis que bloqueiam `.m3u8` por inspeção de conteúdo.
   Future<void> _carregarComFallback() async {
     final e = _emissora!;
+    urlEmUso = e.urlPreferida;
     await _player.setAudioSource(
       AudioSource.uri(Uri.parse(e.urlPreferida)),
       preload: false,
@@ -241,6 +265,7 @@ class RadioAudioHandler extends BaseAudioHandler {
       try {
         if (_tentativasReconexao.isEven && e.urlHls != null) {
           final url = _usandoFallback ? e.urlHls! : e.urlStream;
+          urlEmUso = url;
           await _player.setAudioSource(
             AudioSource.uri(Uri.parse(url)),
             preload: false,

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import 'audio_handler.dart';
 import 'config.dart';
+import 'diagnostico.dart';
 import 'emissora.dart';
 import 'preferencias.dart';
 import 'schedule_page.dart';
@@ -382,6 +383,16 @@ class AboutPage extends StatelessWidget {
             leading: Icon(Icons.mail_outline),
             title: Text('Contato'),
             subtitle: Text(Config.contato),
+          ),
+          const Divider(height: 40),
+          ListTile(
+            leading: const Icon(Icons.bug_report_outlined),
+            title: const Text('Diagnóstico de reprodução'),
+            subtitle: const Text('Use se o som não estiver saindo'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DiagnosticoPage()),
+            ),
           ),
         ],
       ),
