@@ -1,3 +1,21 @@
+import java.util.Properties
+import java.io.FileInputStream
+
+// Assinatura de release.
+//
+// O `flutter create` deixa o release assinado com a chave de DEBUG, o que
+// gera um APK que a Google Play recusa. Aqui lemos android/key.properties,
+// criado pela esteira de CI a partir dos segredos do repositório.
+//
+// O arquivo NUNCA é versionado (ver .gitignore). Se não existir, o build
+// cai na chave de debug — útil para rodar localmente, inútil para publicar.
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+val temAssinatura = keystorePropertiesFile.exists()
+if (temAssinatura) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -30,11 +48,26 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (temAssinatura) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = keystoreProperties["storeFile"]?.let { file(it) }
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (temAssinatura) {
+                signingConfigs.getByName("release")
+            } else {
+                // Sem keystore: cai no debug para o build local funcionar.
+                // NÃO publicável — a Play Store recusa APK com chave de debug.
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

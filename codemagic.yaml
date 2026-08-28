@@ -1,73 +1,22 @@
-# Codemagic — build de Android e iOS na nuvem.
+# Codemagic — build de iOS.
+#
+# SÓ iOS, DE PROPÓSITO.
+# O Android é compilado no GitHub Actions (.github/workflows/android.yml),
+# que é gratuito e ilimitado para repositório público. O plano gratuito do
+# Codemagic dá 500 min/mês de macOS — recurso escasso e insubstituível,
+# porque iOS não compila em mais lugar nenhum. Gastá-lo com Android seria
+# desperdiçar o único que não tem alternativa.
 #
 # ESTE ARQUIVO PRECISA FICAR NA RAIZ DO REPOSITÓRIO.
-# Ele já esteve em `app/` e o Codemagic respondeu "No configuration file
-# found" — ele só procura na raiz. Como o projeto Flutter vive em `app/`,
-# cada workflow declara `working_directory: app`, e os caminhos de artefato
-# são relativos à RAIZ (por isso o prefixo `app/`).
+# Já esteve em `app/` e o Codemagic respondeu "No configuration file found".
+# Como o projeto Flutter vive em `app/`, o workflow declara
+# `working_directory: app`, e os caminhos de artefato são relativos à RAIZ.
 #
-# POR QUE EXISTE:
-# Compilar para iOS exige macOS com Xcode. A 1bit não tem Mac, e não há
-# contorno legal (nem Linux, nem Docker). O Codemagic aluga o macOS por
-# minuto, mais barato que um Mac mini para um app que muda pouco.
-#
-# CONFIGURAR ANTES DO PRIMEIRO BUILD (na interface do Codemagic):
-#   Android → Code signing → subir radio.jks e criar o grupo de variáveis
-#             'android_signing' com CM_KEYSTORE_PASSWORD, CM_KEY_PASSWORD,
-#             CM_KEY_ALIAS
-#   iOS     → Teams → Integrations → Apple Developer Portal
-#   Grupo 'app_store' → APP_STORE_APP_ID (vem da App Store Connect)
+# CONFIGURAR ANTES DO PRIMEIRO BUILD:
+#   Teams → Integrations → Apple Developer Portal
+#   Grupo de variáveis 'app_store' → APP_STORE_APP_ID (App Store Connect)
 
 workflows:
-  # ───────────────────────────────────────────────────────────────────────
-  android:
-    name: Android — APK e AAB
-    max_build_duration: 60
-    instance_type: linux_x2
-    working_directory: app        # o projeto Flutter não está na raiz
-    environment:
-      flutter: 3.29.2             # MESMA versão validada localmente
-      java: 17                    # Gradle moderno exige 17; com Java 8 falha
-      groups:
-        - android_signing         # keystore e senhas no cofre do Codemagic
-    scripts:
-      - name: Dependências
-        script: flutter pub get
-
-      - name: Análise estática
-        # Roda ANTES de compilar: erro de Dart aparece em ~40s em vez de
-        # esperar 10 minutos de build para descobrir.
-        script: flutter analyze
-
-      - name: Testes
-        script: flutter test
-
-      - name: APK (instalar direto no aparelho para testar)
-        script: flutter build apk --release
-
-      - name: AAB (formato exigido pela Google Play)
-        script: flutter build appbundle --release
-
-    # Caminhos relativos à RAIZ do repositório, não ao working_directory.
-    artifacts:
-      - app/build/app/outputs/flutter-apk/*.apk
-      - app/build/app/outputs/bundle/release/*.aab
-      - app/build/app/outputs/**/mapping.txt
-
-    publishing:
-      email:
-        recipients:
-          - atendimento@1bit.net.br
-        notify:
-          success: true
-          failure: true
-      # Publicação automática: configure a conta de serviço da Google Play e
-      # descomente. Enquanto o app está em validação, o certo é baixar o AAB
-      # do painel e enviar à mão.
-      # google_play:
-      #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
-      #   track: internal
-
   # ───────────────────────────────────────────────────────────────────────
   ios:
     name: iOS — IPA

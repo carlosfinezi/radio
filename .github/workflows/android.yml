@@ -1,0 +1,135 @@
+# Build Android — GitHub Actions (gratuito)
+#
+# POR QUE AQUI E NÃO NO CODEMAGIC:
+# Repositório público = minutos ILIMITADOS de Linux no GitHub Actions.
+# O Codemagic tem 500 min/mês de macOS no plano gratuito, e macOS é o
+# recurso escasso — o único que não dá para substituir, porque iOS só
+# compila lá. Gastar esses minutos com Android seria desperdício.
+#
+# Divisão adotada:
+#   Android -> GitHub Actions (aqui, de graça)
+#   iOS     -> Codemagic (codemagic.yaml, só quando for publicar)
+#
+# ASSINATURA:
+# Sem os segredos configurados, gera um APK de DEBUG — instalável e
+# suficiente para testar. Com os segredos, gera o APK e o AAB assinados,
+# prontos para a Google Play.
+#
+# Para habilitar a assinatura, em Settings → Secrets and variables →
+# Actions, crie:
+#   KEYSTORE_BASE64     -> base64 -w0 radio.jks
+#   KEYSTORE_PASSWORD   -> senha do store
+#   KEY_PASSWORD        -> senha da chave
+#   KEY_ALIAS           -> radio
+
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:        # permite disparar à mão pelo painel do GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Java 17
+        # O Gradle moderno exige 17. Com Java 8 o build falha com erro de
+        # versão de classe, mensagem que não deixa óbvia a causa.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Flutter 3.29.2
+        # MESMA versão validada no servidor (analyze limpo, 4 testes
+        # passando). Fixar a versão evita "funcionava ontem".
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.2'
+          channel: stable
+          cache: true
+
+      - name: Dependências
+        working-directory: app
+        run: flutter pub get
+
+      - name: Análise estática
+        # Antes de compilar: erro de Dart aparece em ~40s em vez de esperar
+        # o build inteiro.
+        working-directory: app
+        run: flutter analyze
+
+      - name: Testes
+        working-directory: app
+        run: flutter test
+
+      # ── Assinatura (só se os segredos existirem) ───────────────────────
+      - name: Preparar keystore
+        id: keystore
+        working-directory: app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/radio.jks
+            cat > android/key.properties <<EOF
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=radio.jks
+          EOF
+            echo "assinado=sim" >> "$GITHUB_OUTPUT"
+            echo "::notice::Keystore encontrado — gerando build assinado."
+          else
+            echo "assinado=nao" >> "$GITHUB_OUTPUT"
+            echo "::warning::Sem KEYSTORE_BASE64 — gerando APK de debug. Instalável, mas NÃO publicável na Play Store."
+          fi
+
+      # ── Build ──────────────────────────────────────────────────────────
+      - name: APK assinado
+        if: steps.keystore.outputs.assinado == 'sim'
+        working-directory: app
+        run: flutter build apk --release
+
+      - name: AAB assinado (formato da Google Play)
+        if: steps.keystore.outputs.assinado == 'sim'
+        working-directory: app
+        run: flutter build appbundle --release
+
+      - name: APK de debug
+        if: steps.keystore.outputs.assinado == 'nao'
+        working-directory: app
+        run: flutter build apk --debug
+
+      # ── Artefatos ──────────────────────────────────────────────────────
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: radio-apk
+          path: app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error   # falha alto: build verde sem APK engana
+          retention-days: 30
+
+      - name: Publicar AAB
+        if: steps.keystore.outputs.assinado == 'sim'
+        uses: actions/upload-artifact@v4
+        with:
+          name: radio-aab
+          path: app/build/app/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Limpar segredos do disco
+        # O runner é descartado, mas não custa nada e evita que um passo
+        # futuro (ou um fork malicioso) leia o keystore.
+        if: always()
+        working-directory: app
+        run: rm -f android/app/radio.jks android/key.properties
