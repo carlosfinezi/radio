@@ -124,6 +124,23 @@ ok "variante HLS aac_${BITRATE} criada"
 # Teto de ouvintes alto: o padrão 2500 vira gargalo antes da banda.
 sql "UPDATE station SET frontend_config=JSON_SET(frontend_config,'\$.max_listeners',20000)
      WHERE id=$EST_ID;"
+
+# ── Calibragem de latência ───────────────────────────────────────────────
+# Valores obtidos empiricamente com transmissão ao vivo real:
+#   dj_buffer 5s  -> o Web DJ caía com "Invalid data" a cada ~45s
+#   dj_buffer 15s -> estável, porém ~50s de atraso até o ouvinte
+#   dj_buffer 8s  -> meio-termo adotado
+# HLS com janela menor faz o player entrar mais perto da borda ao vivo:
+# 3 segmentos de 2s em vez de 5 de 4s corta ~10s do atraso percebido.
+#
+# Se um cliente relatar quedas na transmissão ao vivo, SUBA o dj_buffer
+# (10-12s). Se reclamar de atraso, BAIXE — mas não abaixo de 6s.
+sql "UPDATE station SET backend_config=JSON_SET(backend_config,
+       '\$.dj_buffer', 8,
+       '\$.hls_segment_length', 2,
+       '\$.hls_segments_in_playlist', 3,
+       '\$.hls_segments_overhead', 2
+     ) WHERE id=$EST_ID;"
 sql "UPDATE storage_location sl
      JOIN station s ON s.media_storage_location_id = sl.id
      SET sl.storage_quota=$COTA_BYTES WHERE s.id=$EST_ID;"
