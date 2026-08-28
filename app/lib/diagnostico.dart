@@ -29,6 +29,9 @@ class DiagnosticoPage extends StatelessWidget {
       'url_hls': e?.urlHls,
       'url_stream': e?.urlStream,
       'usando_stream_continuo': h.usandoFallback,
+      // Se o HLS aparecer aqui, foi ele que falhou NESTE aparelho — não a
+      // rede nem o servidor. É o dado que separa as duas hipóteses.
+      'transportes_reprovados': h.transportesReprovados,
       'sessao_de_audio_configurada': h.sessaoConfigurada,
       'erro_da_sessao': h.erroSessao,
       'player_tocando': estado.playing,

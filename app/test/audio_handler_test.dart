@@ -76,4 +76,27 @@ void main() {
     expect(fonte.contains('TargetPlatform.iOS'), isTrue,
         reason: 'Android deve começar pelo stream contínuo');
   });
+
+  test('a reconexão nunca reentra num transporte já reprovado', () {
+    // Alternar incondicionalmente devolvia o Android ao HLS no primeiro
+    // soluço do Icecast — e o HLS quebra no ExoPlayer sem emitir erro novo,
+    // então a cadeia morria ali, muda. Quem falha entra em quarentena.
+    expect(fonte.contains('_urlsReprovadas.add'), isTrue,
+        reason: 'o transporte que falhou precisa entrar em quarentena');
+    expect(fonte.contains('_usandoFallback = !_usandoFallback'), isFalse,
+        reason: 'alternância incondicional reentra no caminho quebrado');
+  });
+
+  test('há vigia de reprodução independente do errorStream', () {
+    // A falha do HLS no ExoPlayer nem sempre emite erro: o player apenas
+    // para em idle. Uma reconexão movida só por erro nunca é acionada, e a
+    // rádio fica muda para sempre, sem nada na tela.
+    expect(fonte.contains('_armarVigia()'), isTrue,
+        reason: 'sem vigia, a falha muda do HLS não é recuperada');
+    expect(
+        RegExp(r'unawaited\(_player\.play\(\)\);[^\n]*\n\s*_armarVigia\(\)')
+            .hasMatch(fonte),
+        isTrue,
+        reason: 'o vigia tem que ser armado logo após cada play');
+  });
 }
