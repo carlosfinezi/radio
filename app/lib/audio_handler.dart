@@ -59,7 +59,14 @@ class RadioAudioHandler extends BaseAudioHandler {
   // ── Emissora ───────────────────────────────────────────────────────────
 
   /// Troca a emissora corrente. Para o que estiver tocando e prepara a nova.
-  Future<void> trocarEmissora(Emissora nova) async {
+  ///
+  /// [tocarEmSeguida] existe porque há dois caminhos até aqui e eles querem
+  /// coisas opostas: quem ESCOLHE uma rádio numa lista está dizendo "quero
+  /// ouvir isto agora"; quem apenas ABRE o app com uma emissora já salva não
+  /// pediu som nenhum ainda. Antes isto tocava só se já estivesse tocando —
+  /// e como na primeira abertura nunca está, escolher a rádio deixava o app
+  /// parado, sem som e sem erro.
+  Future<void> trocarEmissora(Emissora nova, {bool tocarEmSeguida = false}) async {
     final tocava = _player.playing;
     await pause();
     _emissora = nova;
@@ -67,7 +74,7 @@ class RadioAudioHandler extends BaseAudioHandler {
     _usandoFallback = false;
     _tentativasReconexao = 0;
     _publicarItemInicial();
-    if (tocava) await play();
+    if (tocava || tocarEmSeguida) await play();
   }
 
   void _publicarItemInicial() {
@@ -88,12 +95,21 @@ class RadioAudioHandler extends BaseAudioHandler {
   Future<void> play() async {
     if (_emissora == null) return;   // sem emissora escolhida, nada a tocar
     _reconexaoTimer?.cancel();
-    if (_precisaCarregar) {
-      await _carregarComFallback();
+
+    // Antes, uma falha aqui subia pela pilha e morria no `onPressed` do botão:
+    // o app não tocava, não mostrava erro e não tentava de novo. O ouvinte via
+    // um botão de play que aparentemente não fazia nada.
+    try {
+      if (_precisaCarregar) {
+        await _carregarComFallback();
+      }
+      _iniciarAtualizacaoDeMetadados();
+      await _player.play();
+      _tentativasReconexao = 0;
+    } catch (erro) {
+      _publicarErro(erro.toString());
+      _agendarReconexao();
     }
-    _iniciarAtualizacaoDeMetadados();
-    await _player.play();
-    _tentativasReconexao = 0;
   }
 
   /// Numa rádio ao vivo não existe "retomar de onde parou": ao voltar, o
@@ -136,22 +152,42 @@ class RadioAudioHandler extends BaseAudioHandler {
 
   // ── Carga da fonte ─────────────────────────────────────────────────────
 
-  /// Tenta HLS; se falhar, cai para o stream contínuo.
+  /// Tempo máximo esperando uma fonte ficar pronta antes de tentar a outra.
+  ///
+  /// ESTE TIMEOUT É O QUE FAZ O FALLBACK EXISTIR DE VERDADE. `setAudioSource`
+  /// não lança quando o HLS está inacessível ou com a janela de segmentos
+  /// vencida: o Future simplesmente não completa, o player fica em buffering
+  /// para sempre e o `catch` abaixo nunca roda. O sintoma é o pior possível —
+  /// sem som e sem mensagem de erro.
+  static const _limiteCarga = Duration(seconds: 12);
+
+  /// Tenta HLS; se falhar ou demorar, cai para o stream contínuo.
   ///
   /// O fallback não é preciosismo: redes corporativas e alguns provedores
   /// móveis bloqueiam `.m3u8` por inspeção de conteúdo, e sem o segundo
   /// caminho o app simplesmente não toca para esse ouvinte.
   Future<void> _carregarComFallback() async {
     final e = _emissora!;
-    try {
-      await _player.setAudioSource(AudioSource.uri(Uri.parse(e.urlPreferida)));
-      _usandoFallback = e.urlHls == null;
-      _precisaCarregar = false;
-    } catch (_) {
-      await _player.setAudioSource(AudioSource.uri(Uri.parse(e.urlStream)));
-      _usandoFallback = true;
-      _precisaCarregar = false;
+    final hls = e.urlHls;
+
+    if (hls != null) {
+      try {
+        await _player
+            .setAudioSource(AudioSource.uri(Uri.parse(hls)))
+            .timeout(_limiteCarga);
+        _usandoFallback = false;
+        _precisaCarregar = false;
+        return;
+      } catch (_) {
+        // Cai para o stream contínuo logo abaixo.
+      }
     }
+
+    await _player
+        .setAudioSource(AudioSource.uri(Uri.parse(e.urlStream)))
+        .timeout(_limiteCarga);
+    _usandoFallback = true;
+    _precisaCarregar = false;
   }
 
   // ── Reconexão ──────────────────────────────────────────────────────────

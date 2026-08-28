@@ -79,7 +79,7 @@ class _RoteadorState extends State<Roteador> {
       MaterialPageRoute(builder: (_) => SelecaoPage(podeVoltar: podeVoltar)),
     );
     if (escolhida != null) {
-      await audioHandler.trocarEmissora(escolhida);
+      await audioHandler.trocarEmissora(escolhida, tocarEmSeguida: true);
       if (mounted) setState(() {});
     }
   }
@@ -258,6 +258,10 @@ class PlayerPage extends StatelessWidget {
                 final carregando =
                     state?.processingState == AudioProcessingState.loading ||
                         state?.processingState == AudioProcessingState.buffering;
+                final erro =
+                    state?.processingState == AudioProcessingState.error
+                        ? state?.errorMessage
+                        : null;
 
                 return Column(
                   children: [
@@ -300,6 +304,30 @@ class PlayerPage extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (erro != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Falha ao conectar. Tentando de novo…',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: cs.error),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 4),
+                      // Texto cru do erro: é o que permite diagnosticar a
+                      // falha pelo relato do ouvinte, sem precisar do logcat.
+                      Text(
+                        erro,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: cs.outline, fontSize: 11),
+                        textAlign: TextAlign.center,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ],
                 );
               },
