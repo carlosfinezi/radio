@@ -12,3 +12,11 @@ app/ios/Pods/
 app/ios/.symlinks/
 app/ios/Flutter/Flutter.podspec
 app/**/*.iml
+
+# Assinatura Android — NUNCA versionar.
+# Perder o keystore = não conseguir mais atualizar o app publicado.
+# Vazar o keystore = qualquer um pode publicar atualização se passando por você.
+*.jks
+*.keystore
+key.properties
+SENHAS.txt
