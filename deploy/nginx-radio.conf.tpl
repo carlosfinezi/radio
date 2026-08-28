@@ -19,7 +19,13 @@
 server {
     listen      80;
     listen      [::]:80;
-    server_name __DOMINIO__;
+
+    # O curinga é o que sustenta o modelo multi-cliente:
+    # cada rádio atende em <cliente>.__DOMINIO__ e o AzuraCast monta os links
+    # a partir do Host recebido (settings.prefer_browser_url = 1), então o
+    # player, o stream e o app de cada cliente saem com o domínio dele.
+    # Sem o curinga aqui, qualquer subdomínio cai no servidor padrão do nginx.
+    server_name __DOMINIO__ *.__DOMINIO__;
 
     # Upload de acervo: um álbum em WAV passa de 500 MB com facilidade.
     client_max_body_size 2048m;
