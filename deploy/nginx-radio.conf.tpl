@@ -20,12 +20,18 @@ server {
     listen      80;
     listen      [::]:80;
 
-    # O curinga é o que sustenta o modelo multi-cliente:
-    # cada rádio atende em <cliente>.__DOMINIO__ e o AzuraCast monta os links
-    # a partir do Host recebido (settings.prefer_browser_url = 1), então o
-    # player, o stream e o app de cada cliente saem com o domínio dele.
-    # Sem o curinga aqui, qualquer subdomínio cai no servidor padrão do nginx.
-    server_name __DOMINIO__ *.__DOMINIO__;
+    # NOME EXATO, NUNCA CURINGA. Aprendido quebrando:
+    #
+    # Com `server_name radio.1bit.net.br *.radio.1bit.net.br`, ao emitir o
+    # certificado do primeiro cliente o certbot encontrou ESTE bloco como o
+    # melhor match para `radiodemo.radio.1bit.net.br` (o curinga casa) e
+    # reescreveu o ssl_certificate do domínio PRINCIPAL apontando para o
+    # certificado do cliente. O painel passou a servir o certificado errado.
+    #
+    # Cada cliente ganha seu próprio arquivo em conf.d/ com nome exato, e o
+    # certbot edita sempre o arquivo certo. O multi-cliente continua nativo:
+    # o AzuraCast monta os links pelo Host recebido (prefer_browser_url=1).
+    server_name __DOMINIO__;
 
     # Upload de acervo: um álbum em WAV passa de 500 MB com facilidade.
     client_max_body_size 2048m;
