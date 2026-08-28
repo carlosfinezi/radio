@@ -36,3 +36,17 @@ SELECT
   hide_product_name                   AS oculta_nome_produto,
   LENGTH(internal_custom_css)         AS bytes_css
 FROM settings;
+
+-- ── Idioma do painel ─────────────────────────────────────────────────────
+-- A ordem de resolução do AzuraCast é:
+--   1. locale do PERFIL do usuário
+--   2. Accept-Language do NAVEGADOR
+--   3. variável de ambiente LANG
+-- Com o perfil NULL, quem decide é o navegador do cliente: um Chrome em
+-- inglês mostra o painel inteiro em inglês, por mais que LANG=pt_BR.UTF-8
+-- esteja no servidor. A tradução pt_BR do AzuraCast é 99,95% completa
+-- (2081 strings, 1 sem tradução), então só faltava selecioná-la.
+UPDATE users SET locale = 'pt_BR.UTF-8'
+  WHERE locale IS NULL OR locale = 'default' OR locale = '';
+
+SELECT id, email, locale FROM users;

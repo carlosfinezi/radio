@@ -145,11 +145,20 @@ PAPEL=$(api -X POST "$API_URL/api/admin/roles" -d "$(jq -n --arg n "Gestor — $
 ok "papel criado (id=$PAPEL) — escopado APENAS à estação $EST_ID"
 
 SENHA=$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)
+# `locale` explícito é OBRIGATÓRIO aqui, não um capricho.
+# A ordem de resolução do AzuraCast (Enums/SupportedLocales::createFromRequest)
+# é: perfil do usuário -> Accept-Language do NAVEGADOR -> variável LANG.
+# Com o perfil em NULL, o navegador do cliente decide — e um cliente com
+# Chrome em inglês vê o painel inteiro em inglês, por mais que LANG=pt_BR
+# esteja no servidor. Definir no perfil é a única forma de garantir.
 USR=$(api -X POST "$API_URL/api/admin/users" -d "$(jq -n \
   --arg e "$EMAIL" --arg n "$NOME" --arg p "$SENHA" --argjson r "$PAPEL" \
-  '{email:$e, name:$n, new_password:$p, roles:[{id:$r}]}')" | jq -r '.id // empty')
+  '{email:$e, name:$n, new_password:$p, locale:"pt_BR.UTF-8", roles:[{id:$r}]}')" | jq -r '.id // empty')
 [[ -n "$USR" ]] || die "falha ao criar o usuário"
-ok "usuário $EMAIL criado (id=$USR)"
+
+# Cinto e suspensório: se a API ignorar o campo locale, grava direto.
+sql "UPDATE users SET locale='pt_BR.UTF-8' WHERE id=$USR;"
+ok "usuário $EMAIL criado (id=$USR) · painel em português"
 
 # ── Subdomínio ───────────────────────────────────────────────────────────
 step "Publicando $DOMINIO"
