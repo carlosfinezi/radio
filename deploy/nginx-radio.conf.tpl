@@ -83,6 +83,23 @@ server {
         proxy_pass http://127.0.0.1:8081;
         proxy_http_version 1.1;
 
+        # IDIOMA — força português independentemente do navegador do visitante.
+        #
+        # O AzuraCast resolve o idioma nesta ordem
+        # (Enums/SupportedLocales::createFromRequest):
+        #   1. locale do perfil do usuário  (só existe se estiver logado)
+        #   2. Accept-Language do NAVEGADOR
+        #   3. variável LANG do servidor
+        #
+        # A PÁGINA PÚBLICA não tem usuário logado, então quem decidia era o
+        # navegador do ouvinte: visitante com Chrome em inglês recebia o
+        # player em inglês, numa rádio brasileira. Reescrevendo o cabeçalho
+        # aqui, a etapa 2 sempre devolve pt_BR.
+        #
+        # Não atrapalha o painel: o locale do perfil (etapa 1) tem prioridade,
+        # então um cliente que queira outro idioma ainda pode escolher.
+        proxy_set_header Accept-Language "pt-BR,pt;q=0.9";
+
         # WebSocket do "tocando agora". Connection fixo em "upgrade" quebraria
         # keep-alive nas requisições normais; repassando $http_upgrade o
         # cabeçalho some quando vazio.
