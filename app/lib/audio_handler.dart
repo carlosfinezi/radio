@@ -104,7 +104,12 @@ class RadioAudioHandler extends BaseAudioHandler {
         await _carregarComFallback();
       }
       _iniciarAtualizacaoDeMetadados();
-      await _player.play();
+      // NUNCA `await _player.play()`. A documentação do just_audio é
+      // explícita: o Future "completa quando a reprodução termina, é pausada
+      // ou parada". Numa rádio ao vivo isso nunca acontece — o await ficava
+      // pendurado para sempre, travando trocarEmissora(), a abertura do app
+      // e a tela de seleção junto com ele.
+      unawaited(_player.play());
       _tentativasReconexao = 0;
     } catch (erro) {
       _publicarErro(erro.toString());
@@ -216,7 +221,7 @@ class RadioAudioHandler extends BaseAudioHandler {
           _precisaCarregar = true;
           await _carregarComFallback();
         }
-        await _player.play();
+        unawaited(_player.play());   // ver play(): não completa em stream ao vivo
         _tentativasReconexao = 0;
       } catch (erro) {
         _publicarErro(erro.toString());

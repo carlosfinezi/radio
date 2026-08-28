@@ -67,9 +67,21 @@ class _RoteadorState extends State<Roteador> {
   Future<void> _iniciar() async {
     // Carrega do disco, não da rede: sem isso o app abriria numa tela de
     // erro quando o ouvinte estivesse sem conexão, em vez de tentar tocar.
-    final salva = await Preferencias.emissoraSalva();
-    if (salva != null) {
-      await audioHandler.trocarEmissora(salva);
+    //
+    // O timeout é cinto de segurança, não otimização. Uma versão anterior
+    // ficava presa aqui para sempre e o app não passava do indicador de
+    // carregamento — só limpar os dados do aplicativo destravava. Seja qual
+    // for a falha, é melhor abrir na tela de seleção do que não abrir.
+    try {
+      final salva = await Preferencias.emissoraSalva()
+          .timeout(const Duration(seconds: 5));
+      if (salva != null) {
+        await audioHandler
+            .trocarEmissora(salva)
+            .timeout(const Duration(seconds: 10));
+      }
+    } catch (_) {
+      // Segue para a tela de seleção.
     }
     if (mounted) setState(() => _carregando = false);
   }
