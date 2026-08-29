@@ -30,6 +30,14 @@ on:
     paths:
       - 'app/**'
       - '.github/workflows/android.yml'
+  # Sem este gatilho um PR não compilava NADA: o painel mostrava "Checks 0" e
+  # a única forma de obter APK de uma branch era o disparo manual. Revisar
+  # mudança de player sem APK instalável é revisar no escuro.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:        # permite disparar à mão pelo painel do GitHub
 
 jobs:

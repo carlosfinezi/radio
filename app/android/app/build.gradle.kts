@@ -61,6 +61,19 @@ android {
 
     buildTypes {
         release {
+            // R8 LIGADO, MAS COM O media3 PRESERVADO. Ver proguard-rules.pro.
+            //
+            // Sem essas regras o ExoPlayer quebrava com um NullPointerException
+            // engolido como "(2) Unexpected runtime error", e a rádio ficava
+            // muda em qualquer transporte. Provado por eliminação em emulador:
+            // com isMinifyEnabled = false o som sai; com R8 sem regras, não.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+
             signingConfig = if (temAssinatura) {
                 signingConfigs.getByName("release")
             } else {
