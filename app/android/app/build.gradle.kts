@@ -61,30 +61,18 @@ android {
 
     buildTypes {
         release {
-            // MINIFICAÇÃO DESLIGADA — EXPERIMENTO, NÃO DECISÃO DEFINITIVA.
+            // R8 LIGADO, MAS COM O media3 PRESERVADO. Ver proguard-rules.pro.
             //
-            // O logcat do emulador (Android 11 x86_64, APK release 1.0.7)
-            // mostrou o que "(2) Unexpected runtime error" escondia:
-            //
-            //   E/ExoPlayerImplInternal: Playback error
-            //     X.n: Unexpected runtime error
-            //   Caused by: java.lang.NullPointerException
-            //     at C1.c.f(Unknown Source:1)
-            //     at X.U.h(SourceFile:241)
-            //
-            // NPE dentro do ExoPlayer, em classes de nome ofuscado, 260 ms
-            // depois do Init — antes de tocar a rede. O erro é idêntico no
-            // stream MP3 contínuo e no HLS, o que já descartou o transporte;
-            // servidor, manifesto, permissões e sessão de áudio também já
-            // foram verificados e estão corretos.
-            //
-            // Resta separar "o R8 quebrou o media3" de "bug legítimo". Com a
-            // minificação desligada isso se decide numa tentativa: se o som
-            // sair, era o R8, e o passo seguinte é reativar o R8 COM as regras
-            // de keep corretas — não deixar desligado, que incha o APK e é
-            // remédio pior que a doença.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // Sem essas regras o ExoPlayer quebrava com um NullPointerException
+            // engolido como "(2) Unexpected runtime error", e a rádio ficava
+            // muda em qualquer transporte. Provado por eliminação em emulador:
+            // com isMinifyEnabled = false o som sai; com R8 sem regras, não.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
 
             signingConfig = if (temAssinatura) {
                 signingConfigs.getByName("release")
