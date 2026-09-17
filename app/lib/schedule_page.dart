@@ -29,6 +29,29 @@ class _SchedulePageState extends State<SchedulePage> {
     _futuro = _carregar();
   }
 
+  /// RECARREGA QUANDO A EMISSORA MUDA. Sem isto a aba fica presa na grade da
+  /// estação anterior.
+  ///
+  /// `initState` roda UMA vez. Esta página vive dentro de um `IndexedStack`
+  /// (ver HomeShell), que constrói todas as abas de uma vez e as mantém vivas;
+  /// ao trocar de emissora o Flutter reaproveita este State — mesmo tipo, mesma
+  /// posição, sem key — e `_futuro` continua apontando para o resultado antigo.
+  ///
+  /// O sintoma não é erro nenhum: a aba diz "Nenhum programa agendado" para uma
+  /// emissora que tem grade cheia, e só se corrige fechando e reabrindo o app.
+  /// Reproduzido em emulador: abrir na Rádio Demonstração (zero programas),
+  /// trocar para a Porto do Capim (quatro) e a aba seguir vazia.
+  @override
+  void didUpdateWidget(SchedulePage anterior) {
+    super.didUpdateWidget(anterior);
+    // Comparar pelo slug, não pelo objeto: Emissora não implementa ==, então
+    // duas instâncias da MESMA estação seriam tidas como diferentes e a grade
+    // recarregaria a cada rebuild do HomeShell.
+    if (anterior.emissora.slug != widget.emissora.slug) {
+      setState(() => _futuro = _carregar());
+    }
+  }
+
   Future<List<_Programa>> _carregar() async {
     final r = await http
         .get(Uri.parse(widget.emissora.urlProgramacao))
