@@ -25,7 +25,18 @@ plugins {
 
 android {
     namespace = "br.net.onebit.bitradio"
-    compileSdk = flutter.compileSdkVersion
+
+    // FIXADO EM 36, NÃO `flutter.compileSdkVersion`.
+    //
+    // O Flutter 3.29.2 resolve esse valor para 35, e a Play Console RECUSA o
+    // envio com isso: "o nível desejado da API do app é 35. No entanto, esse
+    // nível precisa ser de pelo menos 36". O erro só aparece na revisão da
+    // versão, DEPOIS do upload do AAB — o build passa verde, o que faz parecer
+    // que está tudo certo até o último passo.
+    //
+    // compileSdk acompanha o targetSdk: compilar contra 35 e declarar alvo 36
+    // faz o AGP recusar.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -43,7 +54,8 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // Mínimo exigido pela Play Store para envios novos. Ver compileSdk acima.
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
