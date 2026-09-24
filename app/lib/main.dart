@@ -225,19 +225,28 @@ class PlayerPage extends StatelessWidget {
                     Container(
                       width: 240,
                       height: 240,
+                      clipBehavior: Clip.antiAlias,
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(20),
                         color: cs.surfaceContainerHighest,
-                        image: item?.artUri != null
-                            ? DecorationImage(
-                                image: NetworkImage(item!.artUri.toString()),
-                                fit: BoxFit.cover,
-                              )
-                            : null,
                       ),
+                      // Image.network com errorBuilder, não DecorationImage.
+                      //
+                      // A capa vem do AzuraCast e troca a cada música, então uma
+                      // URL quebrada não é exceção: é rotina. Em DecorationImage
+                      // a falha vira exceção de imagem NÃO TRATADA a cada poll de
+                      // 15s, e a caixa fica vazia — sem nem o ícone genérico,
+                      // porque `child` só existia quando não havia arte.
                       child: item?.artUri == null
                           ? Icon(Icons.radio, size: 88, color: cs.onSurfaceVariant)
-                          : null,
+                          : Image.network(
+                              item!.artUri.toString(),
+                              fit: BoxFit.cover,
+                              width: 240,
+                              height: 240,
+                              errorBuilder: (_, __, ___) => Icon(Icons.radio,
+                                  size: 88, color: cs.onSurfaceVariant),
+                            ),
                     ),
                     const SizedBox(height: 28),
                     Text(
@@ -271,10 +280,35 @@ class PlayerPage extends StatelessWidget {
                 final carregando =
                     state?.processingState == AudioProcessingState.loading ||
                         state?.processingState == AudioProcessingState.buffering;
-                final erro =
-                    state?.processingState == AudioProcessingState.error
-                        ? state?.errorMessage
-                        : null;
+                final falhou =
+                    state?.processingState == AudioProcessingState.error;
+                final erro = falhou ? state?.errorMessage : null;
+
+                // "Fora do ar" ACUSAVA A EMISSORA DE UM SILÊNCIO QUE ERA NOSSO.
+                //
+                // pause() publica `playing: false` com processingState `ready`
+                // — o mesmo par que o app mostra antes do primeiro play. O
+                // rótulo antigo não distinguia isso de falha e anunciava a
+                // estação fora do ar sempre que o ouvinte apertava parar. Quem
+                // não sabe que pausou (carro, fone, tela de bloqueio) conclui
+                // que a rádio caiu, e é exatamente o tipo de coisa que volta
+                // como "o app diz que a rádio saiu do ar" num relatório de
+                // teste. Agora só quem está em erro de verdade aparece assim.
+                final String rotulo;
+                final Color cor;
+                if (carregando) {
+                  rotulo = 'Conectando…';
+                  cor = cs.outline;
+                } else if (tocando) {
+                  rotulo = 'AO VIVO';
+                  cor = Colors.redAccent;
+                } else if (falhou) {
+                  rotulo = 'Sem sinal';
+                  cor = cs.error;
+                } else {
+                  rotulo = 'Pausado';
+                  cor = cs.outline;
+                }
 
                 return Column(
                   children: [
@@ -285,6 +319,10 @@ class PlayerPage extends StatelessWidget {
                           ? const Center(child: CircularProgressIndicator())
                           : IconButton.filled(
                               iconSize: 48,
+                              // tooltip vira o rótulo do TalkBack. Sem ele o
+                              // leitor de tela anuncia só "botão" no único
+                              // controle que importa nesta tela.
+                              tooltip: tocando ? 'Parar' : 'Ouvir ao vivo',
                               // pause() e não stop(): mantém a sessão de mídia
                               // viva, para o botão do fone e do carro
                               // continuarem funcionando depois de parar.
@@ -303,21 +341,24 @@ class PlayerPage extends StatelessWidget {
                           height: 8,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: tocando ? Colors.redAccent : cs.outline,
+                            color: cor,
                           ),
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          carregando
-                              ? 'Conectando…'
-                              : tocando
-                                  ? 'AO VIVO'
-                                  : 'Fora do ar',
-                          style: Theme.of(context).textTheme.labelLarge,
+                          rotulo,
+                          style: Theme.of(context)
+                              .textTheme
+                              .labelLarge
+                              ?.copyWith(color: falhou ? cs.error : null),
                         ),
                       ],
                     ),
-                    if (erro != null) ...[
+                    // Prende no ESTADO, não na mensagem. `errorMessage` é
+                    // opcional: um estado de erro sem texto deixaria o ouvinte
+                    // com "Sem sinal" na tela e nenhum botão para reagir —
+                    // justamente na hora em que ele mais precisa de um.
+                    if (falhou) ...[
                       const SizedBox(height: 12),
                       Text(
                         'Falha ao conectar. Tentando de novo…',
@@ -327,18 +368,30 @@ class PlayerPage extends StatelessWidget {
                             ?.copyWith(color: cs.error),
                         textAlign: TextAlign.center,
                       ),
-                      const SizedBox(height: 4),
-                      // Texto cru do erro: é o que permite diagnosticar a
-                      // falha pelo relato do ouvinte, sem precisar do logcat.
-                      Text(
-                        erro,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: cs.outline, fontSize: 11),
-                        textAlign: TextAlign.center,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
+                      if (erro != null) ...[
+                        const SizedBox(height: 4),
+                        // Texto cru do erro: é o que permite diagnosticar a
+                        // falha pelo relato do ouvinte, sem precisar do logcat.
+                        Text(
+                          erro,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(color: cs.outline, fontSize: 11),
+                          textAlign: TextAlign.center,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      // A reconexão automática recua até 30s entre tentativas.
+                      // Quem acabou de sair do elevador não tem por que esperar
+                      // esse recuo: o botão zera a espera E a quarentena de
+                      // transportes. Sem ele a única saída era fechar o app.
+                      TextButton.icon(
+                        onPressed: () => audioHandler.tentarNovamente(),
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Tentar de novo'),
                       ),
                     ],
                   ],

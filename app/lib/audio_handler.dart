@@ -245,6 +245,26 @@ class RadioAudioHandler extends BaseAudioHandler {
     ));
   }
 
+  /// Retentativa PEDIDA pelo ouvinte, do zero.
+  ///
+  /// Não dá para reaproveitar [play] aqui. Depois de uma falha `_precisaCarregar`
+  /// continua `false` — quem o zera é [_carregar], que roda ANTES de o erro
+  /// chegar pelo `onError`. Então um [play] mandaria tocar exatamente a fonte
+  /// que acabou de quebrar, e o botão pareceria não fazer nada.
+  ///
+  /// Também esvazia a quarentena. Quando a queda foi da REDE — elevador, túnel,
+  /// troca de Wi-Fi para dados — os dois transportes foram reprovados por um
+  /// motivo que já passou; insistir no "melhor que restou" é insistir em nada.
+  /// Quem toca o botão está dizendo que a situação mudou.
+  Future<void> tentarNovamente() async {
+    _reconexaoTimer?.cancel();
+    _vigiaTimer?.cancel();
+    _urlsReprovadas.clear();
+    _tentativasReconexao = 0;
+    _precisaCarregar = true;
+    await play();
+  }
+
   @override
   Future<void> stop() async {
     _metadataTimer?.cancel();

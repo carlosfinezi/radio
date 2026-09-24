@@ -102,6 +102,27 @@ void main() {
         reason: 'alternância incondicional reentra no caminho quebrado');
   });
 
+  test('a retentativa manual recarrega a fonte e limpa a quarentena', () {
+    // Um `play()` puro não recupera nada depois de uma falha: `_precisaCarregar`
+    // continua false, porque quem o zera é _carregar — que roda ANTES de o erro
+    // chegar pelo onError. O botão mandaria tocar exatamente a fonte quebrada.
+    //
+    // E a quarentena tem que cair junto: quando a queda foi da rede (elevador,
+    // túnel, Wi-Fi para dados), os dois transportes foram reprovados por um
+    // motivo que já passou.
+    expect(fonte.contains('Future<void> tentarNovamente()'), isTrue);
+    expect(
+        RegExp(r'tentarNovamente\(\)\s*async\s*\{[\s\S]{0,400}?_precisaCarregar\s*=\s*true')
+            .hasMatch(fonte),
+        isTrue,
+        reason: 'sem _precisaCarregar a retentativa toca a fonte quebrada');
+    expect(
+        RegExp(r'tentarNovamente\(\)\s*async\s*\{[\s\S]{0,400}?_urlsReprovadas\.clear\(\)')
+            .hasMatch(fonte),
+        isTrue,
+        reason: 'a quarentena precisa cair: a falha pode ter sido da rede');
+  });
+
   test('há vigia de reprodução independente do errorStream', () {
     // A falha do HLS no ExoPlayer nem sempre emite erro: o player apenas
     // para em idle. Uma reconexão movida só por erro nunca é acionada, e a
