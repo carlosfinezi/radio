@@ -45,12 +45,12 @@ TINTA = (255, 255, 255)
 BASE = 2048
 
 
-def desenhar(tamanho: int) -> Image.Image:
-    img = Image.new("RGBA", (BASE, BASE), FUNDO + (255,))
+def desenhar(tamanho: int, fundo=FUNDO + (255,), escala: float = 1.0) -> Image.Image:
+    img = Image.new("RGBA", (BASE, BASE), fundo)
     d = ImageDraw.Draw(img)
 
     cx, cy = BASE // 2, BASE // 2
-    ponto_r = int(BASE * 0.058)
+    ponto_r = int(BASE * 0.058 * escala)
 
     # Ponto emissor, ao centro
     d.ellipse([cx - ponto_r, cy - ponto_r, cx + ponto_r, cy + ponto_r], fill=TINTA)
@@ -62,13 +62,56 @@ def desenhar(tamanho: int) -> Image.Image:
     # "rádio". Ondas saindo dos dois lados de um ponto central é a leitura
     # convencional de transmissão sonora.
     for raio_f, esp_f in [(0.15, 0.032), (0.245, 0.036), (0.34, 0.040)]:
-        r = int(BASE * raio_f)
-        esp = int(BASE * esp_f)
+        r = int(BASE * raio_f * escala)
+        esp = int(BASE * esp_f * escala)
         caixa = [cx - r, cy - r, cx + r, cy + r]
         d.arc(caixa, start=-52, end=52, fill=TINTA, width=esp)      # direita
         d.arc(caixa, start=128, end=232, fill=TINTA, width=esp)     # esquerda
 
-    return img.resize((tamanho, tamanho), Image.LANCZOS).convert("RGB")
+    img = img.resize((tamanho, tamanho), Image.LANCZOS)
+    return img.convert("RGB") if fundo[3] == 255 else img
+
+
+# O ícone que o APARELHO mostra sai de android/app/src/main/res, não daqui.
+# Até a v13 esses mipmaps eram o "F" padrão do `flutter create`, e o Google
+# reprovou a versão por "ícone instalado difere do ícone da loja" (política
+# de Declarações enganosas, out/2026). Por isso o gerador escreve os dois.
+RES = AQUI.parent / "android" / "app" / "src" / "main" / "res"
+DENSIDADES = {"mdpi": 1, "hdpi": 1.5, "xhdpi": 2, "xxhdpi": 3, "xxxhdpi": 4}
+
+# Ícone adaptativo (Android 8+): camada de 108dp, mas só o círculo central
+# de 66dp é garantido sob qualquer máscara. Os arcos externos chegam a 0,36
+# do lado; 0,7 os põe em ~0,25 — dentro da zona segura e com o mesmo
+# tamanho aparente do ícone da loja depois do recorte de 72dp.
+ESCALA_ADAPTATIVO = 0.7
+
+
+def gerar_android():
+    for nome, fator in DENSIDADES.items():
+        pasta = RES / f"mipmap-{nome}"
+        pasta.mkdir(parents=True, exist_ok=True)
+        # Legado (Android < 8): o quadrado inteiro, igual ao da loja.
+        desenhar(int(48 * fator)).save(pasta / "ic_launcher.png", "PNG", optimize=True)
+        # Frente do adaptativo: só a tinta, fundo transparente.
+        desenhar(int(108 * fator), fundo=(0, 0, 0, 0), escala=ESCALA_ADAPTATIVO).save(
+            pasta / "ic_launcher_foreground.png", "PNG", optimize=True)
+
+    anydpi = RES / "mipmap-anydpi-v26"
+    anydpi.mkdir(parents=True, exist_ok=True)
+    # monochrome = ícone temático do Android 13; usa só o alfa da frente.
+    (anydpi / "ic_launcher.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <background android:drawable="@color/ic_launcher_background"/>\n'
+        '    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n'
+        '    <monochrome android:drawable="@mipmap/ic_launcher_foreground"/>\n'
+        '</adaptive-icon>\n', encoding="utf-8")
+    (RES / "values" / "ic_launcher_background.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<resources>\n'
+        '    <color name="ic_launcher_background">#%02X%02X%02X</color>\n'
+        '</resources>\n' % FUNDO, encoding="utf-8")
+    print(f"  mipmaps do Android em {RES}")
 
 
 def main():
@@ -87,6 +130,8 @@ def main():
         img.save(saida, "PNG", optimize=True)
         kb = saida.stat().st_size / 1024
         print(f"  icone-{tam}.png  {tam}x{tam}  {kb:.1f} KB")
+
+    gerar_android()
 
     print()
     print("  PROVISÓRIO — substituir pela identidade visual da emissora")
