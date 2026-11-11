@@ -64,4 +64,18 @@ void main() {
     expect(RegExp(r'tooltip:\s*tocando').hasMatch(codigo), isTrue,
         reason: 'o play/stop precisa de rótulo acessível');
   });
+
+  test('o fundo é da emissora e não derruba o player quando falta', () {
+    expect(codigo.contains('emissora.urlFundo'), isTrue,
+        reason: 'cada emissora tem o próprio fundo');
+    // Emissora sem imagem cadastrada responde 404 — é o caso NORMAL, não
+    // exceção. Precisa cair em nada, não em erro de imagem não tratado.
+    expect(RegExp(r'urlFundo,[\s\S]{0,200}errorBuilder').hasMatch(codigo), isTrue,
+        reason: 'fundo ausente tem de sumir em silêncio');
+    // O construtor continua `const PlayerPage({...})`; o que não pode é o
+    // USO sem argumento, que era como a casca o instanciava.
+    expect(RegExp(r'const\s+PlayerPage\(\s*\)').hasMatch(codigo), isFalse,
+        reason: 'PlayerPage constante não reconstrói ao trocar de emissora '
+            'e mantém o fundo da anterior');
+  });
 }

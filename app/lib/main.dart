@@ -185,7 +185,10 @@ class _HomeShellState extends State<HomeShell> {
       body: IndexedStack(
         index: _aba,
         children: [
-          const PlayerPage(),
+          // Sem `const`: o fundo depende da emissora, e um PlayerPage
+          // constante é o mesmo widget antes e depois da troca — o Flutter
+          // não o reconstruiria e o fundo da emissora anterior ficaria.
+          PlayerPage(emissora: e),
           SchedulePage(emissora: e),
           const AboutPage(),
         ],
@@ -204,12 +207,37 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 class PlayerPage extends StatelessWidget {
-  const PlayerPage({super.key});
+  final Emissora emissora;
+  const PlayerPage({super.key, required this.emissora});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Fundo da emissora. Ausente (404) ou sem rede, some sem aviso:
+        // a imagem é enfeite, e o player tem de funcionar sem ela.
+        Image.network(
+          emissora.urlFundo,
+          key: ValueKey(emissora.urlFundo),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+        // Véu: a imagem é de cada cliente, clara ou escura, com texto ou
+        // não. Sem ele, título e botões ficariam ilegíveis em metade dos
+        // fundos. 0,65 é o meio-termo medido: com 0,82 o fundo da Porto do
+        // Capim sumia; abaixo de ~0,6 uma imagem quase branca deixa o texto
+        // branco sem contraste. withValues e não withOpacity, que é obsoleto
+        // no Flutter da CI e faria o `flutter analyze` reprovar.
+        ColoredBox(color: cs.surface.withValues(alpha: 0.65)),
+        _conteudo(context, cs),
+      ],
+    );
+  }
+
+  Widget _conteudo(BuildContext context, ColorScheme cs) {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(24),

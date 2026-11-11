@@ -38,6 +38,15 @@ class Emissora {
   /// Grade de programação desta emissora.
   String get urlProgramacao => '${Config.baseUrl}/api/station/$slug/schedule';
 
+  /// Imagem de fundo do player, própria de cada emissora.
+  ///
+  /// Não vem da API: `/api/stations` do AzuraCast não expõe nada de
+  /// identidade visual. É um arquivo estático por convenção de nome, servido
+  /// pelo nginx da plataforma (ver deploy/nginx-radio.conf.tpl). Emissora sem
+  /// arquivo dá 404 e o player fica com o visual padrão — por isso cadastrar
+  /// cliente novo não exige imagem, e colocar uma não exige versão nova do app.
+  String get urlFundo => '${Config.baseUrl}/fundos/$slug.jpg';
+
   /// HLS quando existir, senão o stream contínuo.
   ///
   /// O HLS é preferido por sobreviver a troca de rede (wifi -> 4G) e por
