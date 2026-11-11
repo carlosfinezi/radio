@@ -78,6 +78,15 @@ server {
         }
     }
 
+    # ── Páginas e imagens próprias (fora do AzuraCast) ────────────────
+    # Servidas do disco, não pelo proxy: são nossas, não do AzuraCast.
+    location = /privacidade.html { root /var/www/radio-publico; }
+    location = /player.html      { root /var/www/radio-publico; }
+    # Fundo do player do app, um arquivo por emissora: fundos/<slug>.jpg
+    # (origem versionada em deploy/fundos/). Emissora sem arquivo dá 404 e o
+    # app mantém o visual padrão. ^~ impede que as regex de baixo capturem.
+    location ^~ /fundos/ { root /var/www/radio-publico; try_files $uri =404; expires 1d; }
+
     # ── Web DJ — transmissão ao vivo pelo navegador ───────────────────
     # O locutor fala pelo microfone e o áudio sobe por WebSocket até o
     # harbor do Liquidsoap (porta dj_port da estação), interrompendo o AutoDJ.
